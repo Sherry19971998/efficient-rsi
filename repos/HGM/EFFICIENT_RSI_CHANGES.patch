@@ -1,0 +1,549 @@
+diff --git a/.dockerignore b/.dockerignore
+index 69f8f34..9b54e04 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -35,4 +35,7 @@ utils/docker_utils.py
+ hgm_utils.py
+ hgm.py
+ evaluate_agent.py
+-run.sh
+\ No newline at end of file
++run.sh
++rsi_ledger.py
++dgm_search.py
++final_eval.py
+diff --git a/hgm.py b/hgm.py
+index 62c80a6..a8ffe89 100644
+--- a/hgm.py
++++ b/hgm.py
+@@ -20,6 +20,7 @@ from datasets import load_dataset
+ from utils.docker_utils import copy_src_files
+ 
+ import hgm_utils
++import rsi_ledger
+ from config import load_config
+ from tree import Node
+ from utils.common_utils import load_json_file
+@@ -115,6 +116,9 @@ def initialize_run(
+         ]
+         if node.commit_id != "initial":
+             n_task_evals += metadata["overall_performance"]["total_submitted_instances"]
++        else:
++            # the root's results come from the cached initial evaluation, not from sample()
++            rsi_ledger.event("eval_result", node="initial", score=list(node.utility_measures), source="initial_cache")
+     hgm_utils.n_task_evals = n_task_evals
+     return os.path.join(initial_folder, initial_agent_name, "src"), submitted_ids
+ 
+@@ -230,6 +234,25 @@ def main():
+         default=None,
+         help="Randomness level for evaluation task selection.",
+     )
++    parser.add_argument(
++        "--search",
++        choices=["hgm", "dgm"],
++        default="hgm",
++        help="Search policy: HGM, or DGM's policy run on this harness (efficient-RSI baseline).",
++    )
++    parser.add_argument(
++        "--dgm_parallel",
++        type=int,
++        default=None,
++        help="Children per DGM generation (default: 4 for Polyglot, 2 for SWE-bench, as in the DGM paper).",
++    )
++    parser.add_argument(
++        "--max_hours",
++        type=float,
++        default=None,
++        help="Also stop once this many hours have passed since the start (DGM: between generations; HGM: no new "
++             "expansion or evaluation is started, those in flight finish).",
++    )
+     parser.add_argument(
+         "--initial_agent_name",
+         type=str,
+@@ -356,6 +379,30 @@ def main():
+     logger.info(
+         f"Starting HGM run {run_id} with configuration: {config.to_dict()}"
+     )
++    rsi_ledger.event("run_start", method=args.search, harness="hgm", run_id=run_id, config=config.to_dict(),
++                     fix_descendant_evals=os.getenv("HGM_FIX_DESCENDANT_EVALS", "1") == "1")
++    if args.search == "dgm":
++        import dgm_search
++        dgm_search.run(output_dir, src_path, image_name=path_cfg.initial_agent_name + ":latest",
++                       max_task_evals=exec_cfg.max_task_evals, polyglot=eval_cfg.polyglot,
++                       n_parallel=args.dgm_parallel, logger=logger, max_hours=args.max_hours)
++        return
++
++    # Efficient-RSI node stopping (erl/online_stop.py), off unless HGM_ERL_STOP=1: a child whose
++    # upper bound, with the predictors prior, falls below the incumbents lower bound gets no more
++    # evaluations. It stays in the tree as a possible parent.
++    erl_stop = None
++    erl_expand = os.getenv("HGM_ERL_EXPAND", "0") == "1"
++    if os.getenv("HGM_ERL_STOP", "0") == "1":
++        import sys
++        sys.path.insert(0, os.getenv("HGM_ERL_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "erl")))
++        import online_stop
++        erl_stop = online_stop.from_env(log=rsi_ledger.event)
++        for n in sorted(hgm_utils.nodes.values(), key=lambda n: n.id):   # the root; existing nodes of a continued run
++            erl_stop.seed(n.commit_id, None if n.parent_id is None else hgm_utils.nodes[n.parent_id].commit_id,
++                          list(n.utility_measures))
++        rsi_ledger.event("erl_start", expand=erl_expand, alpha=erl_stop.alpha, min_evals=erl_stop.min_evals, w=str(erl_stop.w),
++                         history_rows=len(erl_stop.hist[0]), seeded=len(erl_stop.states))
+ 
+     def TS_sample(evals):
+         alphas = [1 + np.sum(de) for de in evals]
+@@ -379,6 +426,24 @@ def main():
+     n_pending_expands = 0
+     n_pending_measures = 0
+     lock = threading.Lock()
++    t_start = time.time()
++    stopped = []
++
++    def out_of_time():
++        """--max_hours for HGM: once past it, start nothing new (called under the lock)."""
++        if args.max_hours is None:
++            return False
++        hours = (time.time() - t_start) / 3600
++        if hours < args.max_hours:
++            return False
++        if not stopped:
++            stop = {"max_hours": args.max_hours, "hours": round(hours, 3), "n_task_evals": hgm_utils.n_task_evals}
++            stopped.append(stop)
++            with open(os.path.join(output_dir, "stopped_on_time.json"), "w") as f:
++                json.dump(stop, f, indent=2)
++            rsi_ledger.event("budget_stop", reason="max_hours", **stop)
++            logger.info(f"HGM stopped after {hours:.2f} h (cap {args.max_hours} h), {hgm_utils.n_task_evals} task evals")
++        return True
+ 
+     def expand():
+         with lock:
+@@ -392,27 +457,40 @@ def main():
+                 for node in nodes
+             ]
+             selected_node = nodes[TS_sample(decendant_evals)]
++        rsi_ledger.event("select_parent", node=selected_node.commit_id,
++                         n_candidates=len(nodes), n_task_evals=hgm_utils.n_task_evals)
+         child_commit = hgm_utils.sample_child(
+             selected_node.commit_id,
+             image_name=path_cfg.initial_agent_name + ":latest",
+         )
++        rsi_ledger.event("node_created" if child_commit != "failed" else "propose_failed",
++                         node=None if child_commit == "failed" else child_commit,
++                         parent=selected_node.commit_id)
+         with lock:
+             if child_commit != "failed":
+                 selected_node.children.append(
+                     Node(child_commit, parent_id=selected_node.id)
+                 )
++                if erl_stop is not None:
++                    erl_stop.node_created(child_commit, selected_node.commit_id,
++                                          os.path.join(output_dir, child_commit, "model_patch.diff"))
+                 update_metadata(output_dir, hgm_utils.n_task_evals)
+ 
+     def sample():
++        if stopped:   # past --max_hours: return at once instead of sleeping through the queued calls
++            return
+         time.sleep(random.random())
+         with lock:
+             nonlocal n_pending_expands, n_pending_measures
+-            if hgm_utils.n_task_evals >= exec_cfg.max_task_evals:
++            if hgm_utils.n_task_evals >= exec_cfg.max_task_evals or out_of_time():
+                 return
+ 
++            # HGM_ERL_EXPAND=1: retired children do not count against the expansion budget, so the
++            # evaluations that stopping saves go to new children instead of re-evaluating old ones.
++            n_retired = len(erl_stop.retired) if erl_stop is not None and erl_expand else 0
+             if (
+                 hgm_utils.n_task_evals**opt_cfg.alpha
+-                >= len(hgm_utils.nodes) - 1 + n_pending_expands
++                >= len(hgm_utils.nodes) - 1 - n_retired + n_pending_expands
+             ):
+                 n_pending_expands += 1
+                 is_expand = True
+@@ -428,6 +506,7 @@ def main():
+             nodes = hgm_utils.nodes[0].get_sub_tree(fn=lambda node: node)
+             nodes = [
+                 node for node in nodes if len(submitted_ids[node.id]) < total_num_tasks
++                and (erl_stop is None or erl_stop.allow(node.commit_id))
+             ]
+             evals = [node.utility_measures for node in nodes]
+             if len(evals) == 0:
+@@ -449,13 +528,18 @@ def main():
+             submitted_ids[selected_node.id].add(selected_node_tasks)
+             n_pending_measures += 1
+ 
++        t_eval = time.time()
+         evals = hgm_utils.eval_agent(
+             selected_node.commit_id,
+             tasks=[selected_node_tasks],
+             init_agent_path=src_path,
+         )
++        rsi_ledger.event("eval_result", node=selected_node.commit_id,
++                         task=selected_node_tasks, score=evals)
+         with lock:
+             selected_node.utility_measures += evals
++            if erl_stop is not None:
++                erl_stop.result(selected_node.commit_id, list(evals), time.time() - t_eval)
+             n_pending_measures -= 1
+             update_metadata(output_dir, hgm_utils.n_task_evals)
+ 
+diff --git a/hgm_utils.py b/hgm_utils.py
+index 3466404..71ab4d5 100644
+--- a/hgm_utils.py
++++ b/hgm_utils.py
+@@ -31,6 +31,7 @@ from utils.docker_utils import (build_hgm_container, cleanup_container,
+ from utils.eval_utils import get_acc_on_tasks
+ from utils.evo_utils import (get_all_performance, get_model_patch_paths,
+                              is_compiled_self_improve)
++import rsi_ledger
+ 
+ dataset = None
+ alpha = 0.5
+@@ -257,12 +258,13 @@ def eval_agent(
+             init_agent_path=init_agent_path,
+         )
+         safe_log("Start make_report")
+-        make_report(
+-            dnames,
+-            run_ids=[f"{commit_id}_{i}" for i in range(len(dnames))],
+-            output_dir=os.path.join(output_dir, commit_id),
+-            num_eval_procs=min(max_workers, len(tasks)),
+-        )
++        with rsi_ledger.span("eval_report", node=commit_id, task=tasks[0] if len(tasks) == 1 else None, n_tasks=len(tasks)):
++            make_report(
++                dnames,
++                run_ids=[f"{commit_id}_{i}" for i in range(len(dnames))],
++                output_dir=os.path.join(output_dir, commit_id),
++                num_eval_procs=min(max_workers, len(tasks)),
++            )
+         safe_log("Start get_performance")
+ 
+         _, overall_performance = get_all_performance(
+@@ -283,6 +285,8 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+     out_dir_base = output_dir  # out_dir_base should be /hgm/output_selfimprove/ or /hgm/output_hgm/{hgm_run_id}/
+     run_output_dir = os.path.join(root_dir, f"{output_dir}/{run_id}/")
+     os.makedirs(run_output_dir, exist_ok=True)
++    phases = rsi_ledger.Phases("propose", node=run_id, parent=parent_commit)
++    phases.phase("setup")
+ 
+     try:
+         if parent_commit == "failed":
+@@ -312,6 +316,7 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+             force_rebuild=force_rebuild,
+         )
+         container.start()
++        phases.attach(container)
+         if polyglot:
+             exec_result = container.exec_run("rm /hgm/coding_agent.py", workdir="/")
+             log_container_output(exec_result)
+@@ -369,14 +374,16 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+         except Exception as e:
+             choose_entry(parent_commit, debug=True)
+             raise e
+-        problem_statement = diagnose_problem(
+-            entry,
+-            parent_commit,
+-            root_dir,
+-            out_dir_base,
+-            patch_files=patch_files,
+-            polyglot=polyglot,
+-        )
++        phases.phase("diagnose")
++        with rsi_ledger.bind(node=run_id):
++            problem_statement = diagnose_problem(
++                entry,
++                parent_commit,
++                root_dir,
++                out_dir_base,
++                patch_files=patch_files,
++                polyglot=polyglot,
++            )
+         safe_log(f"problem_statement: {problem_statement}")
+ 
+         metadata["entry"] = entry
+@@ -425,6 +432,8 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+             "--timeout",
+             str(timeout),
+         ]
++        env_vars.update(rsi_ledger.proxy_env("propose", run_id))
++        phases.phase("agent_run")
+         exec_result = container.exec_run(cmd, environment=env_vars, workdir="/")
+         log_container_output(exec_result, raise_error=False)
+ 
+@@ -460,6 +469,7 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+             safe_log(traceback.format_exc())
+             return "failed"
+     finally:
++        phases.done()
+         try:
+             cleanup_container(container)
+         except Exception as e:
+diff --git a/llm.py b/llm.py
+index 33afd18..2d0b1cb 100644
+--- a/llm.py
++++ b/llm.py
+@@ -23,17 +23,23 @@ def create_client(model: str):
+     if "gpt" in model or model.startswith("o"):
+         print(f"Using OpenAI API with model {model}.")
+         return openai.OpenAI(), model
+-    elif "vllm" in model.lower():
++    # RSI_PROXY_PREFIX (set only when cost metering is on) routes the call through the
++    # metering proxy, which forwards it unchanged to the same provider.
++    proxy = os.getenv("RSI_PROXY_PREFIX")
++    if "vllm" in model.lower():
+         print(f"Using vllm API with model {model}.")
+         return (
+-            openai.OpenAI(base_url=f"http://{model[11:]}:8000/v1", api_key="dummy"),
++            openai.OpenAI(
++                base_url=f"{proxy}/p/vllm/v1" if proxy else f"http://{model[11:]}:8000/v1",
++                api_key="dummy",
++            ),
+             model,
+         )
+     else:
+         print(f"Using OpenRouter API with model {model}.")
+         return (
+             openai.OpenAI(
+-                base_url="https://openrouter.ai/api/v1",
++                base_url=f"{proxy}/p/openrouter/v1" if proxy else "https://openrouter.ai/api/v1",
+                 api_key=os.getenv("OpenRouter_API_KEY"),
+             ),
+             model,
+diff --git a/polyglot/harness.py b/polyglot/harness.py
+index 58a3b62..8b2c240 100644
+--- a/polyglot/harness.py
++++ b/polyglot/harness.py
+@@ -23,6 +23,7 @@ from swe_bench.utils import (copy_from_container, copy_to_container,
+                              log_container_output, remove_existing_container,
+                              safe_log, setup_logger)
+ from utils.git_utils import filter_patch_by_files, remove_patch_by_files
++import rsi_ledger
+ 
+ llm = ""
+ timeout = 1800  # seconds
+@@ -62,6 +63,8 @@ def process_entry(
+     # Initialize container as None to avoid UnboundLocalError
+     container = None
+ 
++    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
++    phases.phase("setup")
+     try:
+         # Create and start the Docker container
+         client = docker.from_env()
+@@ -78,6 +81,7 @@ def process_entry(
+             test_spec, client, run_id, logger, nocache, force_rebuild=False
+         )
+         container.start()
++        phases.attach(container)
+ 
+         # Copy the necessary files and requirements to the container
+         copy_to_container(
+@@ -185,6 +189,8 @@ def process_entry(
+             "--timeout",
+             str(timeout),
+         ]
++        env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
++        phases.phase("agent_run")
+         exec_result = container.exec_run(cmd, environment=env_vars, workdir="/testbed/")
+         log_container_output(exec_result)
+ 
+@@ -212,6 +218,7 @@ def process_entry(
+         # Additional proposed model patches
+         proposed_model_patches = []
+ 
++        phases.phase("test")
+         # Directly do eval
+         eval_result = ""
+         if not model_patch:
+@@ -309,6 +316,7 @@ def process_entry(
+         }
+ 
+     finally:
++        phases.done()
+         # Clean up docker container
+         try:
+             if container is not None:
+diff --git a/prompts/self_improvement_prompt.py b/prompts/self_improvement_prompt.py
+index 4b6ac96..9adf617 100644
+--- a/prompts/self_improvement_prompt.py
++++ b/prompts/self_improvement_prompt.py
+@@ -269,6 +269,46 @@ def find_selfimprove_eval_logs(entry, out_dir, commit_id="initial", filter=True)
+     return md_logs, eval_logs, predicted_patches, eval_results
+ 
+ 
++# Efficient-RSI fix (HGM_DIAG_CLIP=1, set by `run_all.sh v2`; off by default so earlier runs keep
++# upstream behaviour): clip the parts of the diagnose prompt that upstream leaves unbounded. With a
++# 131k-token model, a parent whose solution patch held tens of millions of characters (generated
++# files) made every diagnose call fail, so the parent could never get a child. Upstream already clips
++# md_log at 100k characters and has these clips commented out. Limits are in characters. Measured with
++# the Qwen3-Coder tokenizer on the largest first-run files: logs 3.3-3.9 characters per token, the
++# largest solution patches 2.6. CLIP_TOTAL = 300k characters is then at most ~115k tokens, under the
++# 131,072-token context minus the 4,096 output tokens.
++DIAG_CLIP = os.getenv("HGM_DIAG_CLIP", "0") == "1"
++CLIP_CODE = int(os.getenv("HGM_DIAG_CLIP_CODE", "120000"))
++CLIP_PATCH = int(os.getenv("HGM_DIAG_CLIP_PATCH", "50000"))
++CLIP_EVAL_LOG = int(os.getenv("HGM_DIAG_CLIP_EVAL_LOG", "30000"))
++CLIP_TOTAL = int(os.getenv("HGM_DIAG_CLIP_TOTAL", "300000"))
++# The diagnose templates end with the JSON answer format the reply is parsed against, so a prompt
++# that is still too long is cut in the middle (the logs), keeping this many characters at the end.
++CLIP_KEEP_TAIL = 8000
++
++
++def clip(text, limit, what):
++    if not DIAG_CLIP or text is None or len(text) <= limit:
++        return text
++    return text[:limit] + f"\n<{what} clipped: {len(text) - limit} more characters>"
++
++
++def fit_prompt(system_message, prompt, limit, keep_tail=CLIP_KEEP_TAIL):
++    """Shorten prompt so that system_message + prompt stays within limit characters.
++
++    Cuts from the middle, so the beginning (the task and the agent's log) and the end (the answer
++    format) both survive. Returns the prompt unchanged when it already fits.
++    """
++    room = limit - len(system_message)
++    if len(system_message) + len(prompt) <= limit:
++        return prompt
++    tail = min(keep_tail, max(0, room // 2))
++    marker = f"\n<... {{}} characters clipped to fit the model's context ...>\n"
++    head = max(0, room - tail - len(marker) - 12)
++    cut = len(prompt) - head - tail
++    return prompt[:head] + marker.format(cut) + (prompt[-tail:] if tail else "")
++
++
+ def process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches, eval_results):
+     # NOTE: using only the first logs
+     md_log = md_logs[0] if md_logs else "No logs available."
+@@ -290,6 +330,8 @@ def process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches, eval_re
+     #     eval_log = eval_log[:100000] + "\n<log clipped>"
+     # if len(predicted_patch) > 100000:
+     #     predicted_patch = predicted_patch[:100000] + "\n<patch clipped>"
++    eval_log = clip(eval_log, CLIP_EVAL_LOG, "log")
++    predicted_patch = clip(predicted_patch, CLIP_PATCH, "patch")
+ 
+     eval_result = (
+         eval_results[0]
+@@ -398,6 +440,7 @@ def get_diagnose_prompt_swe(
+     code_text = get_current_code(
+         root_dir, code_files, patch_files=patch_files, exclude_files=exclude_files
+     )
++    code_text = clip(code_text, CLIP_CODE, "code")
+     diagnose_system_message_out = coding_agent_summary + diagnose_system_message.format(
+         code=code_text
+     )
+@@ -437,6 +480,7 @@ def get_diagnose_prompt_polyglot(
+         exclude_files=exclude_files,
+         is_polyglot=is_polyglot,
+     )
++    code_text = clip(code_text, CLIP_CODE, "code")
+     # if len(code_text) > 100000:
+     #     code_text = code_text[:100000] + "\n<code clipped>"
+     safe_log(
+diff --git a/self_improve_step.py b/self_improve_step.py
+index a06840b..ac93b77 100644
+--- a/self_improve_step.py
++++ b/self_improve_step.py
+@@ -10,6 +10,7 @@ import subprocess
+ 
+ import docker
+ 
++import rsi_ledger
+ from llm import create_client, extract_json_between_markers, get_response_from_llm
+ 
+ from prompts.self_improvement_prompt import (get_diagnose_prompt_polyglot,
+@@ -29,6 +30,7 @@ def diagnose_problem(
+     entry, commit, root_dir, out_dir, patch_files=[], max_attempts=2, polyglot=False
+ ):
+     client = create_client(diagnose_llm)
++    client = (rsi_ledger.tag_client(client[0], "diagnose", task=entry), client[1])
+     if polyglot:
+         diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
+             entry,
+@@ -47,6 +49,12 @@ def diagnose_problem(
+             dataset,
+             patch_files=patch_files,
+         )
++    from prompts.self_improvement_prompt import CLIP_TOTAL, DIAG_CLIP, fit_prompt
++    if DIAG_CLIP:
++        # each retry (max_attempts 2 -> 1 -> 0) shrinks the limit by a quarter, in case some text
++        # tokenizes denser than measured: 300k, 225k, 169k characters
++        limit = int(CLIP_TOTAL * 0.75 ** max(0, 2 - max_attempts))
++        diagnose_prompt = fit_prompt(diagnose_sys_message, diagnose_prompt, limit)
+     try:
+         try:
+             response, msg_history = get_response_from_llm(
+diff --git a/swe_bench/harness.py b/swe_bench/harness.py
+index 7b7965e..aebbd06 100644
+--- a/swe_bench/harness.py
++++ b/swe_bench/harness.py
+@@ -18,6 +18,7 @@ from swe_bench.utils import (copy_from_container, copy_to_container,
+                              log_container_output, remove_existing_container,
+                              safe_log, setup_logger)
+ from utils.common_utils import load_json_file
++import rsi_ledger
+ 
+ llm = ""  # Global variable to hold the LLM model name or path
+ timeout = 1800
+@@ -45,6 +46,8 @@ def process_entry(
+     # Initialize container as None to avoid UnboundLocalError
+     container = None
+ 
++    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
++    phases.phase("setup")
+     try:
+         # Create and start the Docker container
+         client = docker.from_env()
+@@ -61,6 +64,7 @@ def process_entry(
+             test_spec, client, run_id, logger, nocache, force_rebuild=False
+         )
+         container.start()
++        phases.attach(container)
+ 
+         # Check that we are in hgm directory
+         tmp_currdir = os.path.abspath(os.getcwd())
+@@ -198,6 +202,8 @@ def process_entry(
+             "--timeout",
+             str(timeout),
+         ]
++        env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
++        phases.phase("agent_run")
+         exec_result = container.exec_run(cmd, environment=env_vars, workdir="/")
+         log_container_output(exec_result)
+ 
+@@ -259,6 +265,7 @@ def process_entry(
+         return {"success": False, "instance_id": instance_id, "error": str(e)}
+ 
+     finally:
++        phases.done()
+         # Clean up docker container
+         try:
+             if container is not None:
+diff --git a/tree.py b/tree.py
+index cbbe4b5..a45d73c 100644
+--- a/tree.py
++++ b/tree.py
+@@ -7,6 +7,8 @@ import numpy as np
+ import hgm_utils
+ from hgm_utils import eval_agent, sample_child
+ 
++FIX_DESCENDANT_EVALS = os.getenv("HGM_FIX_DESCENDANT_EVALS", "1") == "1"
++
+ 
+ def get_num_total_evals():
+     return hgm_utils.nodes[0].get_sum(lambda node: node.num_evals)
+@@ -43,7 +45,15 @@ class Node:
+             return nodes_list
+ 
+     def get_pseudo_decendant_evals(self, num_pseudo):
+-        return self.utility_measures if self.num_evals < num_pseudo else [self.mean_utility] * num_pseudo
++        if self.num_evals < num_pseudo:
++            # Return a copy: get_decendant_evals extends the result in place, and
++            # extending self.utility_measures itself would mix descendants' evals
++            # into this node's own record. HGM_FIX_DESCENDANT_EVALS=0 restores
++            # the upstream behaviour for comparison runs.
++            if FIX_DESCENDANT_EVALS:
++                return list(self.utility_measures)
++            return self.utility_measures
++        return [self.mean_utility] * num_pseudo
+         
+ 
+     def get_decendant_evals(self, num_pseudo=10):

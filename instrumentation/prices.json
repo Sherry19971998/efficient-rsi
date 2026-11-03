@@ -1,0 +1,20 @@
+{
+  "_note": "USD per 1M tokens, standard tier, short context (<=272K input). Checked 2026-10-11 against https://developers.openai.com/api/docs/pricing. Keys are matched as model-name prefixes (longest wins), so every gpt-5.x family is listed explicitly to keep it from falling back to the gpt-5 price.",
+  "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
+  "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+  "gpt-5": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+  "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+  "gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
+  "gpt-5.2-pro": {"input": 21.00, "output": 168.00},
+  "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+  "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+  "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+  "gpt-5.4-pro": {"input": 30.00, "output": 180.00},
+  "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
+  "gpt-5.5-pro": {"input": 30.00, "output": 180.00},
+  "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "output": 20.00},
+  "gpt-5.6-terra": {"input": 2.00, "cached_input": 0.20, "output": 12.00},
+  "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+  "o3-mini": {"input": 1.10, "cached_input": 0.55, "output": 4.40},
+  "o1": {"input": 15.00, "cached_input": 7.50, "output": 60.00}
+}

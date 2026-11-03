@@ -1,0 +1,25 @@
+# Run outputs: the ledger (hundreds of MB), logs and per-run files. Only the predictor history is kept.
+runs/*
+!runs/erl_history.json
+!runs/.gitkeep
+
+# Machine-specific settings (copy env.sh.example)
+env.sh
+tmp/
+cache/
+venv/
+.venv/
+
+# HGM search outputs, the initial agent's cached evaluation (~590 MB), datasets and build logs
+repos/HGM/output_hgm/
+repos/HGM/initial_polyglot/
+repos/HGM/initial_swe/
+repos/HGM/logs/
+repos/HGM/swe_bench/SWE-bench/
+repos/HGM/polyglot/polyglot-benchmark/
+repos/HGM/polyglot/polyglot_benchmark_metadata.json
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

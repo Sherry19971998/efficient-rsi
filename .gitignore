@@ -12,6 +12,8 @@ venv/
 
 # HGM search outputs, the initial agent's cached evaluation (~590 MB), datasets and build logs
 repos/HGM/output_hgm/
+# DGM's own repository, restored from repos/dgm-changes/ when needed
+repos/dgm/
 repos/HGM/initial_polyglot/
 repos/HGM/initial_swe/
 repos/HGM/logs/

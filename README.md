@@ -12,6 +12,7 @@ built and first run on one server (engr-liu01s); this README sets it up on anoth
 | `run_all.sh` | One entry point for everything: services, checks, searches, final evaluations, reports. Its header lists every subcommand and setting. |
 | `RERUN_V2.md` | The planned corrected rerun (`./run_all.sh v2`): why, what runs, how long, how to check it. Written for the original server; the steps after "Start" apply anywhere. |
 | `repos/HGM/` | HGM (Apache-2.0) with our changes; `repos/HGM/MODIFICATIONS.md` lists them. |
+| `repos/dgm-changes/` | Our changes to DGM's own code (Apache-2.0), as a patch: not used by the main experiments, kept for a secondary check. |
 | `instrumentation/` | Cost metering: the ledger hooks, the metering proxy, GPU samplers, analysis and comparison scripts. |
 | `erl/` | Prediction-driven node stopping (`online_stop.py`) and its offline studies. |
 | `runs/erl_history.json` | Training history for the stopping predictor, built from the first nine runs. All other run outputs are ignored by git. |

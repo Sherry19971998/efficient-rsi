@@ -1,0 +1,445 @@
+diff --git a/.dockerignore b/.dockerignore
+index ff85d93..519d037 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -36,4 +36,6 @@ analysis/
+ prompts/self_improvement_prompt.py
+ prompts/diagnose_improvement_prompt.py
+ utils/evo_utils.py
+-utils/docker_utils.py
+\ No newline at end of file
++utils/docker_utils.py
++rsi_ledger.py
++eval_initial_agent.py
+diff --git a/DGM_outer.py b/DGM_outer.py
+index 2c87f4b..0bf746b 100644
+--- a/DGM_outer.py
++++ b/DGM_outer.py
+@@ -6,6 +6,7 @@ import os
+ import random
+ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError
+ 
++import rsi_ledger
+ from prompts.self_improvement_prompt import find_selfimprove_eval_logs
+ from self_improve_step import self_improve
+ from utils.common_utils import load_json_file
+@@ -25,7 +26,8 @@ def initialize_run(output_dir, prevrun_dir=None, polyglot=False):
+         start_gen_num = metadata['generation'] + 1
+ 
+     # Copy cached initial version into experiment dir
+-    initial_folder_name = 'initial' if not polyglot else 'initial_polyglot'
++    # DGM_INITIAL_DIR points to initial-agent results re-evaluated with another model (see eval_initial_agent.py)
++    initial_folder_name = os.getenv('DGM_INITIAL_DIR') or ('initial' if not polyglot else 'initial_polyglot')
+     if not prevrun_dir and not os.path.exists(f"{output_dir}/{initial_folder_name}"):
+         if os.path.exists(initial_folder_name):
+             os.system(f"cp -r {initial_folder_name}/ {output_dir}/initial")
+@@ -265,6 +267,7 @@ def main():
+     logger = setup_logger(os.path.join(output_dir, "dgm_outer.log"))
+     logger.info(f"Starting DGM run {run_id} with arguments: {vars(args)}")
+     logger.info(f"Archive: {archive}")
++    rsi_ledger.event("run_start", method="dgm", run_id=run_id, config=vars(args))
+     test_more_threshold = 0.4
+     # Run the DGM
+     for gen_num in range(start_gen_num, args.max_generation):
+@@ -276,8 +279,12 @@ def main():
+             polyglot=args.polyglot,
+         )
+         logger.info(f"Self-improve entries for generation {gen_num}: {selfimprove_entries}")
++        for parent_commit, entry in selfimprove_entries:
++            rsi_ledger.event("select_parent", node=parent_commit, entry=entry, generation=gen_num,
++                             n_candidates=len(archive))
+ 
+         # Run self-improvement processes
++        generation_start = datetime.datetime.now()
+         selfimprove_ids = []
+         with ThreadPoolExecutor(max_workers=args.selfimprove_workers) as executor:
+             futures = [
+@@ -320,6 +327,9 @@ def main():
+             num_swe_issues=[len(swe_issues_sm)] if args.shallow_eval else [len(swe_issues_sm), len(swe_issues_med)], logger=logger
+         )
+         archive = update_archive(output_dir, archive, selfimprove_ids_compiled, method=args.update_archive, noise_leeway=args.eval_noise)
++        rsi_ledger.event("generation_done", generation=gen_num, children=selfimprove_ids,
++                         children_compiled=selfimprove_ids_compiled, archive_size=len(archive),
++                         wall_s=(datetime.datetime.now() - generation_start).total_seconds())
+ 
+         # Save DGM state
+         with open(os.path.join(output_dir, "dgm_metadata.jsonl"), "a") as f:
+diff --git a/coding_agent.py b/coding_agent.py
+index c32dfa3..269690f 100644
+--- a/coding_agent.py
++++ b/coding_agent.py
+@@ -82,7 +82,8 @@ class AgenticSystem:
+         self.test_description = test_description
+         self.self_improve = self_improve
+         self.instance_id = instance_id if not self_improve else 'dgm'
+-        self.code_model = CLAUDE_MODEL
++        # DGM_CODE_MODEL / DGM_SELF_IMPROVE_MODEL override the default model for task solving / self-improvement
++        self.code_model = os.getenv('DGM_SELF_IMPROVE_MODEL' if self_improve else 'DGM_CODE_MODEL') or CLAUDE_MODEL
+ 
+         # Initialize logger and store it in thread-local storage
+         self.logger = setup_logger(chat_history_file)
+diff --git a/coding_agent_polyglot.py b/coding_agent_polyglot.py
+index 39bfae0..7b13055 100644
+--- a/coding_agent_polyglot.py
++++ b/coding_agent_polyglot.py
+@@ -113,7 +113,9 @@ class AgenticSystem:
+         self.language = language
+ 
+         # Set the code model based on whether self-improvement is enabled
+-        self.code_model = CLAUDE_MODEL if not self_improve else OPENAI_MODEL
++        # DGM_CODE_MODEL / DGM_SELF_IMPROVE_MODEL override the default model for task solving / self-improvement
++        self.code_model = os.getenv('DGM_SELF_IMPROVE_MODEL' if self_improve else 'DGM_CODE_MODEL') \
++            or (CLAUDE_MODEL if not self_improve else OPENAI_MODEL)
+ 
+         # Initialize logger and store it in thread-local storage
+         self.logger = setup_logger(chat_history_file)
+diff --git a/llm.py b/llm.py
+index d6b4da1..e496188 100644
+--- a/llm.py
++++ b/llm.py
+@@ -20,6 +20,7 @@ AVAILABLE_LLMS = [
+     "o1-mini-2024-09-12",
+     "o1-2024-12-17",
+     "o3-mini-2025-01-31",
++    "gpt-5-mini",
+     # OpenRouter models
+     "llama3.1-405b",
+     # Anthropic Claude models via Amazon Bedrock
+@@ -228,7 +229,7 @@ def get_response_from_llm(
+         )
+         content = response.choices[0].message.content
+         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+-    elif model.startswith("o1-") or model.startswith("o3-"):
++    elif model.startswith(("o1-", "o3-", "gpt-5")):
+         new_msg_history = msg_history + [{"role": "user", "content": system_message + msg}]
+         response = client.chat.completions.create(
+             model=model,
+diff --git a/llm_withtools.py b/llm_withtools.py
+index b75f111..b20e460 100644
+--- a/llm_withtools.py
++++ b/llm_withtools.py
+@@ -41,7 +41,7 @@ def get_response_withtools(
+                 tool_choice=tool_choice,
+                 tools=tools,
+             )
+-        elif model.startswith('o3-'):
++        elif model.startswith(('o3-', 'gpt-5')):
+             response = client.responses.create(
+                 model=model,
+                 input=messages,
+@@ -78,7 +78,7 @@ def check_for_tool_use(response, model=''):
+                 'tool_input': tool_use_block.input,
+             }
+ 
+-    elif model.startswith('o3-'):
++    elif model.startswith(('o3-', 'gpt-5')):
+         # OpenAI, check for tool_calls in response
+         for tool_call in response.output:
+             if tool_call.type == "function_call":
+@@ -118,7 +118,7 @@ def convert_tool_info(tool_info, model=None):
+             'description': tool_info['description'],
+             'input_schema': tool_info['input_schema'],
+         }
+-    elif model.startswith('o3-'):
++    elif model.startswith(('o3-', 'gpt-5')):
+         def add_additional_properties(d):
+             if isinstance(d, dict):
+                 if 'properties' in d:
+@@ -274,7 +274,7 @@ def convert_msg_history(msg_history, model=None):
+     """
+     if 'claude' in model:
+         return convert_msg_history_claude(msg_history)
+-    elif model.startswith('o3-'):
++    elif model.startswith(('o3-', 'gpt-5')):
+         return convert_msg_history_openai(msg_history)
+     else:
+         return msg_history
+@@ -530,7 +530,7 @@ def chat_with_agent(
+             new_msg_history = conv_msg_history
+         new_msg_history = msg_history + new_msg_history
+ 
+-    elif model.startswith('o3-'):
++    elif model.startswith(('o3-', 'gpt-5')):
+         # OpenAI models
+         new_msg_history = chat_with_agent_openai(msg, model=model, msg_history=msg_history, logging=logging)
+         # Current version does not support cross-model conversion
+diff --git a/polyglot/harness.py b/polyglot/harness.py
+index 69a9e89..00431c1 100644
+--- a/polyglot/harness.py
++++ b/polyglot/harness.py
+@@ -24,6 +24,7 @@ from swe_bench.utils import (
+     safe_log,
+     setup_logger,
+ )
++import rsi_ledger
+ 
+ def get_eval_script(commands):
+     return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + commands) + "\n"
+@@ -48,6 +49,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+             result = json.loads(f.read())
+         return result
+ 
++    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
++    phases.phase("setup")
+     try:
+         # Create and start the Docker container
+         client = docker.from_env()
+@@ -62,6 +65,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         # Now create and start the container
+         container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
+         container.start()
++        phases.attach(container)
+ 
+         # Copy the necessary files and requirements to the container
+         copy_to_container(container, 'coding_agent_polyglot.py', '/dgm/coding_agent.py')
+@@ -107,6 +111,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+             "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
+             "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
+         }
++        env_vars.update({k: os.getenv(k) for k in ('DGM_CODE_MODEL', 'DGM_SELF_IMPROVE_MODEL') if os.getenv(k)})
+         safe_log("Running the agent")
+         cmd = [
+             "timeout", "600",  # 10 min timeout
+@@ -119,6 +124,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+             "--test_description", test_description,
+             "--language", entry['language'],
+         ]
++        env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
++        phases.phase("agent_run")
+         exec_result = container.exec_run(cmd, environment=env_vars, workdir='/testbed/')
+         log_container_output(exec_result)
+ 
+@@ -142,6 +149,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         # Additional proposed model patches
+         proposed_model_patches = []
+ 
++        phases.phase("test")
+         # Directly do eval
+         eval_result = ''
+         if not model_patch:
+@@ -227,6 +235,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         return {"success": False, "instance_id": instance_id, "eval_result": eval_result}
+ 
+     finally:
++        phases.done()
+         # Clean up docker container
+         try:
+             cleanup_container(client, container, logger)
+diff --git a/self_improve_step.py b/self_improve_step.py
+index c8e41b5..1a11c58 100644
+--- a/self_improve_step.py
++++ b/self_improve_step.py
+@@ -4,6 +4,8 @@ import json
+ import os
+ import docker
+ 
++import rsi_ledger
++
+ from llm import create_client, get_response_from_llm, extract_json_between_markers
+ from prompts.self_improvement_prompt import get_diagnose_prompt_polyglot, get_diagnose_prompt_swe, get_problem_description_prompt
+ from prompts.diagnose_improvement_prompt import get_diagnose_improvement_prompt
+@@ -25,10 +27,11 @@ from utils.docker_utils import (
+ )
+ 
+ dataset = None
+-diagnose_model = 'o1-2024-12-17'
++diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL') or 'o1-2024-12-17'
+ 
+ def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
+     client = create_client(diagnose_model)
++    client = (rsi_ledger.tag_client(client[0], "diagnose", task=entry), client[1])
+     if polyglot:
+         diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
+             entry, commit, root_dir, out_dir, dataset,
+@@ -87,6 +90,7 @@ def diagnose_improvement(
+         dict: The improvement diagnosis.
+     """
+     client = create_client(diagnose_model)
++    client = (rsi_ledger.tag_client(client[0], "diagnose", task=entry), client[1])
+     diagnose_sys_message, diagnose_prompt = get_diagnose_improvement_prompt(
+         entry, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
+         patch_files=patch_files,
+@@ -137,13 +141,14 @@ def run_harness_swe(entry, model_name_or_path, patch_files, num_evals, output_di
+     )
+     metadata['swe_dnames'] = [str(dn) for dn in dnames]
+     safe_log('Start make_report')
+-    make_report(
+-        dnames,
+-        run_ids=[f"{run_id}_{i}" for i in range(len(dnames))],
+-        dataset_name="princeton-nlp/SWE-bench_Verified",
+-        output_dir=output_dir,
+-        dnames_workers=5,
+-    )
++    with rsi_ledger.span("eval_report", node=run_id, n_tasks=len(test_task_list), stage="small"):
++        make_report(
++            dnames,
++            run_ids=[f"{run_id}_{i}" for i in range(len(dnames))],
++            dataset_name="princeton-nlp/SWE-bench_Verified",
++            output_dir=output_dir,
++            dnames_workers=5,
++        )
+     safe_log('Start get_performance')
+     performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+     metadata['overall_performance'] = overall_performance
+@@ -165,13 +170,14 @@ def run_harness_swe(entry, model_name_or_path, patch_files, num_evals, output_di
+             pred_dname=os.path.join(output_dir, "predictions"),
+         )
+         safe_log('Start make_report more')
+-        make_report(
+-            dnames,
+-            run_ids=[f"{run_id}_{i}" for i in range(len(dnames))],
+-            dataset_name="princeton-nlp/SWE-bench_Verified",
+-            output_dir=output_dir,
+-            dnames_workers=5,
+-        )
++        with rsi_ledger.span("eval_report", node=run_id, n_tasks=len(test_task_list_more), stage="medium"):
++            make_report(
++                dnames,
++                run_ids=[f"{run_id}_{i}" for i in range(len(dnames))],
++                dataset_name="princeton-nlp/SWE-bench_Verified",
++                output_dir=output_dir,
++                dnames_workers=5,
++            )
+         safe_log('Start get_performance')
+         performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+         metadata['overall_performance'] = overall_performance
+@@ -255,6 +261,8 @@ def self_improve(
+     os.makedirs(output_dir, exist_ok=True)
+     metadata['run_id'] = run_id
+     metadata['parent_commit'] = parent_commit
++    phases = rsi_ledger.Phases("propose", node=run_id, parent=parent_commit)
++    phases.phase("setup")
+     test_task_list_big = load_json_file("./swe_bench/subsets/big.json")
+ 
+     # Set up logger
+@@ -272,6 +280,7 @@ def self_improve(
+         force_rebuild=force_rebuild,
+     )
+     container.start()
++    phases.attach(container)
+ 
+     if polyglot:
+         # remove the swe version of coding_agent.py
+@@ -315,10 +324,13 @@ def self_improve(
+     # Get tasks to improve
+     if entry:
+         safe_log(f"Task to improve: {entry}")
+-        problem_statement = diagnose_problem(entry, parent_commit, root_dir, out_dir_base, patch_files=patch_files, polyglot=polyglot)
++        phases.phase("diagnose")
++        with rsi_ledger.bind(node=run_id):
++            problem_statement = diagnose_problem(entry, parent_commit, root_dir, out_dir_base, patch_files=patch_files, polyglot=polyglot)
+         safe_log(f"problem_statement: {problem_statement}")
+     else:
+         safe_log("No entry provided. Exiting.")
++        phases.done(outcome="no_entry")
+         cleanup_container(container)
+         save_metadata(metadata, output_dir)
+         return metadata
+@@ -328,6 +340,7 @@ def self_improve(
+     # If problem statement is not found, exit
+     if not problem_statement:
+         safe_log("Failed to diagnose the problem statement. Exiting.")
++        phases.done(outcome="diagnose_failed")
+         cleanup_container(container)
+         save_metadata(metadata, output_dir)
+         return metadata
+@@ -344,6 +357,7 @@ def self_improve(
+         "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
+         "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
+     }
++    env_vars.update({k: os.getenv(k) for k in ('DGM_CODE_MODEL', 'DGM_SELF_IMPROVE_MODEL') if os.getenv(k)})
+     cmd = [
+         "timeout", "1800",  # 30min timeout
+         "python", "/dgm/coding_agent.py",
+@@ -355,6 +369,8 @@ def self_improve(
+         "--test_description", test_description,
+         "--self_improve",
+     ]
++    env_vars.update(rsi_ledger.proxy_env("propose", run_id))
++    phases.phase("agent_run")
+     exec_result = container.exec_run(cmd, environment=env_vars, workdir='/')
+     log_container_output(exec_result)
+ 
+@@ -375,12 +391,16 @@ def self_improve(
+                 raise Exception("Model patch file is empty")
+     except Exception as e:
+         safe_log(f"Failed to read model patch file: {str(e)}")
++        phases.done(outcome="empty_patch")
++        rsi_ledger.event("propose_failed", parent=parent_commit, reason="empty_patch")
+         save_metadata(metadata, output_dir)
+         return metadata
+ 
+     patch_files.append(model_patch_file)
+ 
+     # Stop and remove the container
++    phases.done(outcome="patch")
++    rsi_ledger.event("node_created", node=run_id, parent=parent_commit, entry=entry)
+     cleanup_container(container)
+ 
+     # Evaluate the performance of the self-improvement
+@@ -415,6 +435,11 @@ def self_improve(
+             safe_log("The self-improvement fail to be complied")
+             metadata['improvement_diagnosis'] = "Fail to complied. Ignore this."
+ 
++    perf = metadata.get('overall_performance') or {}
++    rsi_ledger.event("node_evaluated", node=run_id, parent=parent_commit,
++                     accuracy=perf.get('accuracy_score'), n_submitted=perf.get('total_submitted_instances'),
++                     n_resolved=perf.get('total_resolved_instances'),
++                     deep_accuracy=(metadata.get('overall_performance_deep') or {}).get('accuracy_score'))
+     # Save metadata of this self-improvement attempt
+     save_metadata(metadata, output_dir)
+     return metadata
+diff --git a/swe_bench/harness.py b/swe_bench/harness.py
+index 1b940db..0d7619c 100644
+--- a/swe_bench/harness.py
++++ b/swe_bench/harness.py
+@@ -20,6 +20,7 @@ from swe_bench.utils import (
+     setup_logger,
+ )
+ from utils.common_utils import load_json_file
++import rsi_ledger
+ 
+ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+     """
+@@ -38,6 +39,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         print(f"Skipping existing entry {instance_id}")
+         return {"success": True, "instance_id": instance_id}
+ 
++    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
++    phases.phase("setup")
+     try:
+         # Create and start the Docker container
+         client = docker.from_env()
+@@ -52,6 +55,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         # Now create and start the container
+         container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
+         container.start()
++        phases.attach(container)
+ 
+         # Check that we are in dgm directory
+         tmp_currdir = os.path.abspath(os.getcwd())
+@@ -119,6 +123,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+             "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
+             "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
+         }
++        env_vars.update({k: os.getenv(k) for k in ('DGM_CODE_MODEL', 'DGM_SELF_IMPROVE_MODEL') if os.getenv(k)})
+         safe_log("Running the agent")
+         cmd = [
+             "timeout", "32400",  # 9h timeout
+@@ -131,6 +136,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+             "--test_description", test_description,
+             "--instance_id", instance_id,
+         ]
++        env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
++        phases.phase("agent_run")
+         exec_result = container.exec_run(cmd, environment=env_vars, workdir='/')
+         log_container_output(exec_result)
+ 
+@@ -175,6 +182,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
+         return {"success": False, "instance_id": instance_id, "error": str(e)}
+ 
+     finally:
++        phases.done()
+         # Clean up docker container
+         try:
+             cleanup_container(client, container, logger)

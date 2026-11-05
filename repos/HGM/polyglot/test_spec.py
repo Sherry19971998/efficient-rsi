@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import re
 from dataclasses import dataclass
@@ -19,6 +20,16 @@ from polyglot.dockerfiles import (get_dockerfile_base, get_dockerfile_env,
                                   get_dockerfile_instance)
 
 DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
+
+
+def hide_answers():
+    """HGM_HIDE_ANSWERS=1 (efficient-RSI): keep the tests and the reference solution out of the
+    agent's reach while it solves a task. Upstream, the instance image holds the original task
+    folder (/polyglot/..., with its tests and .meta/ reference solution), and /testbed's git
+    history still points at the commit with all files (origin/HEAD, ORIG_HEAD). With this on,
+    both are removed when the image is built, and the harness fetches that commit from the host
+    only after the agent has finished (polyglot/harness.py)."""
+    return os.getenv("HGM_HIDE_ANSWERS", "0") == "1"
 
 
 @dataclass
@@ -76,7 +87,10 @@ class TestSpec:
 
     @property
     def instance_image_key(self):
-        return f"pb.eval.{self.arch}.{self.instance_id}:latest"
+        # Images built with the answers hidden get their own name, so a cached upstream image
+        # is never reused for them (and the other way round)
+        suffix = ".hidden" if hide_answers() else ""
+        return f"pb.eval.{self.arch}.{self.instance_id}{suffix}:latest"
 
     def get_instance_container_name(self, run_id=None):
         if not run_id:
@@ -127,6 +141,20 @@ def make_repo_script_list(specs, repo, repo_directory, base_commit, env_name):
         f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
         f"cd {repo_directory}",
         f"git reset --hard {base_commit}",
+    ]
+    if hide_answers():
+        setup_commands += [
+            # Forget the commit with the tests and the reference solution: drop every ref that
+            # points at it, then delete the objects nothing points at any more
+            "git remote remove origin",
+            "rm -f .git/ORIG_HEAD .git/FETCH_HEAD",
+            "git reflog expire --expire=now --all",
+            "git gc --prune=now --quiet",
+            f"chmod -R 777 {repo_directory}",  # gc wrote new files; keep them usable for nonroot
+            # The original task folder (tests, .meta/) was only needed for the clone
+            f"rm -rf /{repo}",
+        ]
+    setup_commands += [
         # Make sure conda is available for later use
         "source /opt/miniconda3/bin/activate",
         f"conda activate {env_name}",

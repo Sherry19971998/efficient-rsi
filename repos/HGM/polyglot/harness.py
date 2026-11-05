@@ -17,7 +17,7 @@ from datasets import load_dataset
 from polyglot.constants import MAP_REPO_VERSION_TO_SPECS, TEST_COMMANDS
 from polyglot.docker_build import (build_container, build_env_images,
                                    cleanup_container)
-from polyglot.test_spec import make_test_spec
+from polyglot.test_spec import hide_answers, make_test_spec
 from prompts.testrepo_prompt import get_test_description
 from swe_bench.utils import (copy_from_container, copy_to_container,
                              log_container_output, remove_existing_container,
@@ -237,6 +237,25 @@ def process_entry(
                 "instance_id": instance_id,
                 "eval_result": eval_result,
             }
+
+        if hide_answers():
+            # The agent is done. Stop anything it left running, so no part of it is alive when
+            # the tests arrive, then fetch the commit with the tests from the task's repo on the
+            # host: the image no longer has it (polyglot/test_spec.py, HGM_HIDE_ANSWERS)
+            exec_result = container.exec_run("sh -c 'kill -9 -1 || true'", workdir="/")
+            log_container_output(exec_result)
+            copy_to_container(container, Path(entry["repo"]) / ".git", "/tmp/answer_repo/.git")
+            # The copy keeps the host's file owner, and git won't read a repository owned by
+            # another user unless told it is safe (a command-line -c is not enough for the
+            # repository it fetches from). The container is thrown away after grading.
+            exec_result = container.exec_run(
+                "git config --global --add safe.directory '*'", workdir="/"
+            )
+            log_container_output(exec_result)
+            exec_result = container.exec_run(
+                "git -C /testbed fetch --quiet /tmp/answer_repo HEAD", workdir="/"
+            )
+            log_container_output(exec_result)
 
         exec_result = container.exec_run(
             "git -C /testbed stash push " + " ".join(entry["files"]["solution"]),

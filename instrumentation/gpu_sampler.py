@@ -26,12 +26,40 @@ def query(fields, kind="gpu"):
     return [[x.strip() for x in line.split(",")] for line in out.strip().splitlines() if line.strip()]
 
 
+def with_descendants(pids, proc="/proc"):
+    """The given pids and every process below them. vLLM's engine runs in a child process
+    (EngineCore), and that child, not the `vllm serve` process, is what holds the GPU."""
+    children = {}
+    try:
+        entries = os.listdir(proc)
+    except OSError:   # no /proc (not Linux): only the pids themselves
+        return set(pids)
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "stat")) as f:
+                stat = f.read()
+        except OSError:   # the process ended meanwhile
+            continue
+        ppid = int(stat.rsplit(")", 1)[1].split()[1])   # field 4; the name in () may hold spaces
+        children.setdefault(ppid, []).append(int(name))
+    out, todo = set(), list(pids)
+    while todo:
+        p = todo.pop()
+        if p not in out:
+            out.add(p)
+            todo.extend(children.get(p, []))
+    return out
+
+
 def sample(interval, expect_pids):
     gpus = query("index,uuid,utilization.gpu,memory.used,memory.total")
     apps = query("gpu_uuid,pid,used_memory", kind="apps")
+    expected = with_descendants(expect_pids) if expect_pids else set()
     for index, uuid, util, mem_used, mem_total in gpus:
         procs = [{"pid": int(pid), "mem_mib": int(mem)} for g, pid, mem in apps if g == uuid]
-        foreign = [p["pid"] for p in procs if expect_pids and p["pid"] not in expect_pids]
+        foreign = [p["pid"] for p in procs if expect_pids and p["pid"] not in expected]
         rsi_ledger.event("gpu_sample", gpu=int(index), util_pct=float(util), mem_used_mib=int(mem_used),
                          mem_total_mib=int(mem_total), interval_s=interval, procs=procs,
                          foreign_pids=foreign or None)
@@ -41,7 +69,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--expect-pid", type=int, action="append", default=[],
-                    help="PIDs allowed on the GPU (the vLLM server and its workers); others are flagged")
+                    help="PIDs allowed on the GPU, with all their child processes (the vLLM server); others are flagged")
     args = ap.parse_args()
     if not rsi_ledger.enabled():
         sys.exit("Set RSI_LEDGER before starting the sampler.")

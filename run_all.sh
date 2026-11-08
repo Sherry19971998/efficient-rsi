@@ -22,7 +22,8 @@
 # Knobs (environment variables):
 #   REPEATS="0 1 2"   repeat labels (hgm.py has no --seed; these are independent repeats)
 #   CONFIGS="hgm-fixed hgm-orig dgm"   (also: hgm-erl = hgm-fixed + erl/online_stop.py node stopping,
-#                     predictor history from runs/erl_history.json; hgm-erlx = hgm-erl where retired
+#                     predictor history from runs/erl_history.json if present (a run output, built with
+#                     erl/online_stop.py dump-history; not in git); hgm-erlx = hgm-erl where retired
 #                     children free their expansion slot; neither is in the default list)
 #   HGM_ERL_AUDIT=0.1 HGM_ERL_AUDIT_N=5   hgm-erl*: audit this share of stop decisions (off by default;
 #                     hgm-erlxa = hgm-erlx with 10% audited)
@@ -81,10 +82,16 @@ export RSI_PROXY_URL_CONTAINER="$RSI_PROXY_URL"
 export OPENAI_API_KEY="sk-invalid-local-only"
 unset OpenRouter_API_KEY ANTHROPIC_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || true
 
-# The initial agent's cached results carry no model label; this marker records which model made them.
+# The initial agent's cached results carry no model label; this marker records which model made them
+# and whether the answers were hidden (HGM_HIDE_ANSWERS), so a cache made otherwise is never reused.
 INIT_MARKER="$HGM/initial_polyglot/default_agent/.evaluated_with"
+INIT_KEY="$MODEL_HF hide_answers=${HGM_HIDE_ANSWERS:-0}"
 # Path of the final_result.json that holds the initial agent's held-out evaluation (written by `final`).
 INIT_HELDOUT="$ROOT/runs/initial_heldout_result.path"
+
+# A running search: a python process whose script is hgm.py (not a shell or grep that mentions it).
+SEARCH_PREFIX='^[^ ]*python[0-9.]* hgm\.py'
+SEARCH_RE="$SEARCH_PREFIX( |\$)"
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$ROOT/runs/run_all.log"; }
 
@@ -107,8 +114,8 @@ record_setup() {  # what produced this run, for the experiment log
 }
 
 check_init_marker() {
-  if [[ ! -f "$INIT_MARKER" ]] || [[ "$(cat "$INIT_MARKER")" != "$MODEL_HF" ]]; then
-    echo "initial_polyglot/default_agent was not evaluated with $MODEL_HF; run './run_all.sh init' first" >&2
+  if [[ ! -f "$INIT_MARKER" ]] || [[ "$(cat "$INIT_MARKER")" != "$INIT_KEY" ]]; then
+    echo "initial_polyglot/default_agent was not evaluated with $INIT_KEY; run './run_all.sh init' first" >&2
     exit 1
   fi
 }
@@ -124,15 +131,21 @@ search_run() {  # search_run <config> <label> <budget>
     dgm)       extra=(--search dgm) ;;
     *) echo "unknown config $cfg" >&2; return 1 ;;
   esac
+  # The history is a run output (not in git): build it from finished runs with
+  # `python erl/online_stop.py dump-history ...`. Without it the predictor trains on this search alone.
+  if [[ -n "$erl_hist" && ! -f "$erl_hist" ]]; then
+    log "$label: no $erl_hist; the stopping predictor trains on this search only (see erl/README.md)"
+    erl_hist=""
+  fi
   [[ "$cfg" == dgm && -n "$DGM_MAX_HOURS" ]] && extra+=(--max_hours "$DGM_MAX_HOURS")
   [[ "$cfg" != dgm && -n "${HGM_MAX_HOURS:-}" ]] && extra+=(--max_hours "$HGM_MAX_HOURS")
   local out="output_hgm/$label"
   if [[ -f "$ROOT/runs/$label.complete" ]]; then log "$label: already complete, skipping"; return 0; fi
   # Handover from a previous run_all.sh that was stopped while this run's hgm.py kept going:
   # wait for it, then take the run as it finished instead of starting it again.
-  if pgrep -f -- "--output_dir $out( |\$)" > /dev/null; then
+  if pgrep -f -- "$SEARCH_PREFIX .*--output_dir $out( |\$)" > /dev/null; then
     log "$label: still running under a previous runner, waiting for it"
-    while pgrep -f -- "--output_dir $out( |\$)" > /dev/null; do sleep 60; done
+    while pgrep -f -- "$SEARCH_PREFIX .*--output_dir $out( |\$)" > /dev/null; do sleep 60; done
   fi
   if finished "$label" "$out" "$budget"; then
     touch "$ROOT/runs/$label.complete"
@@ -253,9 +266,10 @@ case "${1:-}" in
     ;;
 
   gpu)
-    pid=$(pgrep -f "vllm serve" | head -1 || true)
-    [[ -n "$pid" ]] || { echo "vLLM is not running" >&2; exit 1; }
-    exec python "$INST/gpu_sampler.py" --interval 5 --expect-pid "$pid"
+    pids=$(pgrep -f '^[^ ]*python[0-9.]* [^ ]*vllm serve ' || true)
+    [[ -n "$pids" ]] || { echo "vLLM is not running" >&2; exit 1; }
+    args=(); for p in $pids; do args+=(--expect-pid "$p"); done
+    exec python "$INST/gpu_sampler.py" --interval 5 "${args[@]}"
     ;;
 
   check)
@@ -267,6 +281,8 @@ case "${1:-}" in
       -s -o /dev/null -w "%{http_code}\n" "http://$BRIDGE:$PROXY_PORT/" >/dev/null \
       && echo "ok  containers reach the proxy" || { echo "FAIL containers cannot reach the proxy (firewall?)"; exit 1; }
     (cd "$INST" && python3 -m unittest discover -s tests -q) && echo "ok  instrumentation tests"
+    [[ "${HGM_HIDE_ANSWERS:-0}" == 1 ]] && echo "ok  HGM_HIDE_ANSWERS=1 (tests and reference solutions hidden)" \
+      || echo "WARN HGM_HIDE_ANSWERS is not 1: the solving agent can read each task's tests and solution (see env.sh.example)"
     [[ -z "$(git -C "$HGM" status --porcelain)" ]] && echo "ok  HGM tree is committed" \
       || echo "WARN HGM has uncommitted changes; commit them so every run maps to a commit"
     ;;
@@ -275,8 +291,8 @@ case "${1:-}" in
     # Evaluates the initial agent on all 59 search tasks once; every run then copies this cache.
     # Done up front so concurrent runs do not race to create it. Its cost is logged under
     # RSI_RUN=initial-eval and is shared by all methods, so it is left out of the comparison.
-    if [[ -f "$INIT_MARKER" && "$(cat "$INIT_MARKER")" == "$MODEL_HF" ]]; then
-      log "initial agent already evaluated with $MODEL_HF"; exit 0
+    if [[ -f "$INIT_MARKER" && "$(cat "$INIT_MARKER")" == "$INIT_KEY" ]]; then
+      log "initial agent already evaluated with $INIT_KEY"; exit 0
     fi
     if [[ -d "$HGM/initial_polyglot/default_agent" ]]; then
       bak="$HGM/initial_polyglot/default_agent.bak.$(date +%s)"
@@ -288,7 +304,7 @@ case "${1:-}" in
     # --search dgm with a zero budget runs only initialize_run(), which evaluates the initial agent.
     (cd "$HGM" && RSI_RUN=initial-eval python hgm.py --config "$CONFIG" --polyglot --search dgm \
         --max_task_evals 0 --output_dir output_hgm/initial-eval > "$ROOT/runs/initial-eval.stdout.log" 2>&1)
-    echo "$MODEL_HF" > "$INIT_MARKER"
+    echo "$INIT_KEY" > "$INIT_MARKER"
     log "initial-eval: done"
     ;;
 
@@ -329,7 +345,7 @@ EOF
     # Corrected rerun (RERUN_V2.md): the diagnose prompt is clipped to fit the model, every search
     # stops after V2_HOURS hours (all comparisons cut at 9.646 GPU hours), labels end in "v2".
     check_init_marker
-    if pgrep -f "[h]gm.py" > /dev/null; then echo "an hgm.py run is still going; stop it first" >&2; exit 1; fi
+    if pgrep -f -- "$SEARCH_RE" > /dev/null; then echo "an hgm.py run is still going; stop it first" >&2; exit 1; fi
     export HGM_DIAG_CLIP=1 HGM_MAX_HOURS="${V2_HOURS:-10.5}" DGM_MAX_HOURS="${V2_HOURS:-10.5}"
     v2_repeats="${V2_REPEATS:-0v2 1v2 2v2}"
     budget="${V2_BUDGET:-2000}"   # high enough that the hour cap, not the budget, ends every search

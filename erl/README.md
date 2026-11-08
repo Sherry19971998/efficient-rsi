@@ -151,7 +151,7 @@ python replay.py --ledger ../runs/ledger.jsonl --output-root ../repos/HGM/output
 
 - 选下一个要评估的节点时，排除被停掉的子代；被停的子代仍留在树里，可以作为父代。
 - 子代创建时读它的 `model_patch.diff` 算 diff 特征；每次评估结束把结果和耗时交给停止器；每 50 个结果重训预测器并重新校准 w。
-- 预测器的历史数据：`runs/erl_history.json`，来自已有 9 个 run（截在 9.646 GPU 小时）的 3802 行。
+- 预测器的历史数据：`runs/erl_history.json`，原始实验里来自已有 9 个 run（截在 9.646 GPU 小时）的 3802 行。它是运行产物，不在 git 里，用 `python online_stop.py dump-history --ledger ... --prescreen-rows ... --runs ... --out ../runs/erl_history.json` 从自己跑完的 run 生成；没有这个文件时，`run_all.sh` 让预测器只用本次搜索的数据训练。
 - 停止和重训都记进账本（`erl_retire`、`erl_fit`）；停止器内部出错只记 `erl_error`，并当作"继续评估"，不会中断搜索。
 - `test_online_stop.py` 检查在线停止器和离线回放在同一结果流上停掉的节点和省下的时间完全一致。
 

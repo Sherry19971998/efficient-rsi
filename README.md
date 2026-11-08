@@ -4,18 +4,21 @@ This repository reproduces the efficient-RSI experiments on the Polyglot benchma
 search policy on HGM's harness, and HGM with prediction-driven node stopping, all driven by one
 local Qwen3-Coder-30B-A3B (FP8) model on vLLM, with every GPU hour and token metered. It was
 built and first run on one server (engr-liu01s); this README sets it up on another machine.
+Start here: follow Setup, then Running. For what the code does and open research directions,
+see `docs/group-meeting-code-walkthrough.html` (in Chinese; open it in a browser).
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `run_all.sh` | One entry point for everything: services, checks, searches, final evaluations, reports. Its header lists every subcommand and setting. |
-| `RERUN_V2.md` | The planned corrected rerun (`./run_all.sh v2`): why, what runs, how long, how to check it. Written for the original server; the steps after "Start" apply anywhere. |
+| `RERUN_V2.md` | The main experiment (`./run_all.sh v2`): what changed from the first round and why, what runs, how long, how to check, resume and report it. |
+| `docs/` | A walkthrough of the code and of open research directions, for new group members. |
 | `repos/HGM/` | HGM (Apache-2.0) with our changes; `repos/HGM/MODIFICATIONS.md` lists them. |
 | `repos/dgm-changes/` | Our changes to DGM's own code (Apache-2.0), as a patch: not used by the main experiments, kept for a secondary check. |
 | `instrumentation/` | Cost metering: the ledger hooks, the metering proxy, GPU samplers, analysis and comparison scripts. |
 | `erl/` | Prediction-driven node stopping (`online_stop.py`) and its offline studies. |
-| `runs/erl_history.json` | Training history for the stopping predictor, built from the first nine runs. All other run outputs are ignored by git. |
+| `runs/` | Run outputs: the cost ledger, logs and the stopping predictor's history (`erl_history.json`, built from finished runs with `erl/online_stop.py dump-history`). Nothing here is kept in git. |
 | `env/` | Exact package versions of the two Python environments on the original server. |
 
 ## Requirements
@@ -39,6 +42,9 @@ built and first run on one server (engr-liu01s); this README sets it up on anoth
    ```
    `BRIDGE` must be the address of the `docker0` interface (`ip -4 addr show docker0`); the
    metering proxy binds there so that only local containers can reach it.
+   Keep `HGM_HIDE_ANSWERS=1` (set in `env.sh.example`): without it the task images leave each
+   task's tests and reference solution where the solving agent can read them
+   (`repos/HGM/MODIFICATIONS.md`). It must already be on when you run `./run_all.sh init`.
 
 2. **vLLM environment** (Python 3.11, its own venv):
    ```bash
@@ -79,21 +85,21 @@ built and first run on one server (engr-liu01s); this README sets it up on anoth
    ```bash
    ./run_all.sh vllm     # window 1; ready when it reports the server is listening
    ./run_all.sh proxy    # window 2
-   ./run_all.sh gpu      # window 3
+   ./run_all.sh gpu      # window 3; needs a working nvidia-smi
+   python3 instrumentation/vllm_metrics_sampler.py --out runs/vllm_metrics.jsonl   # window 4, optional
    ./run_all.sh check    # all lines should start with "ok"
    ```
    Use a git checkout with everything committed: each run records the commit and any local
    diff of `repos/HGM`, and `check` warns when there are uncommitted changes.
 
-7. **The initial agent's evaluation**, shared by every run. Either evaluate it on this machine
-   (about 1 hour):
+7. **The initial agent's evaluation**, shared by every run (about 1 hour, plus building the task
+   images the first time):
    ```bash
    ./run_all.sh init
    ```
-   or restore the original server's cache (`initial_polyglot/`, about 590 MB, provided
-   separately) into `repos/HGM/initial_polyglot/`. Use the cache only if your results will be
-   compared with runs from the original server; runs on this machine alone should use their
-   own evaluation.
+   The original server's cache (`initial_polyglot/`, about 590 MB) was made with the answers
+   visible, before `HGM_HIDE_ANSWERS` existed, so do not reuse it: evaluate the initial agent
+   on your own machine with `HGM_HIDE_ANSWERS=1` on.
 
 ## Running
 

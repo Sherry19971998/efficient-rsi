@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>计算高效的编程智能体自我改进：代码导读与开放方向</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1f2328; --muted: #5b6370; --line: #e3e0d8; --card: #ffffff;
+    --accent: #2f5d8a; --accent-soft: #e8eff7; --warn: #8a5a12; --warn-soft: #fbf1df;
+    --code-bg: #f2f0ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --fg: #e6e6e3; --muted: #a2a8b3; --line: #2e3238; --card: #1d2025;
+      --accent: #8db6e0; --accent-soft: #1f2a36; --warn: #e3b46a; --warn-soft: #2e2618;
+      --code-bg: #24272d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.8 "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 30px; line-height: 1.35; margin: 0 0 8px; }
+  h2 { font-size: 23px; margin: 56px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  h3 { font-size: 19px; margin: 32px 0 8px; }
+  p, li { margin: 8px 0; }
+  .lede { color: var(--muted); font-size: 18px; margin-bottom: 28px; }
+  code, .path {
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.86em;
+    background: var(--code-bg); padding: 1px 6px; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); padding: 14px 16px; border-radius: 8px; overflow-x: auto;
+    font: 14px/1.6 "SF Mono", Menlo, Consolas, monospace;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 15.5px; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--muted); }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 22px; }
+  .toc ol { margin: 4px 0; padding-left: 22px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .note {
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    padding: 12px 16px; border-radius: 6px; margin: 16px 0;
+  }
+  .warn {
+    background: var(--warn-soft); border-left: 3px solid var(--warn);
+    padding: 12px 16px; border-radius: 6px; margin: 16px 0;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 4px 22px 14px; margin: 22px 0;
+  }
+  .card h3 { margin-top: 18px; }
+  .card dl { margin: 6px 0; }
+  .card dt { font-weight: 600; margin-top: 10px; color: var(--accent); }
+  .card dd { margin: 2px 0 0 0; }
+  figure { margin: 22px 0; }
+  figcaption { color: var(--muted); font-size: 14.5px; margin-top: 6px; }
+  svg text { font-family: "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif; }
+  .svg-box { fill: var(--card); stroke: var(--accent); stroke-width: 1.5; }
+  .svg-box2 { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .svg-t { fill: var(--fg); font-size: 14px; }
+  .svg-s { fill: var(--muted); font-size: 12px; }
+  .svg-a { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+  .refs li { font-size: 15px; }
+  .small { font-size: 14.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<h1>计算高效的编程智能体自我改进：代码导读与开放方向</h1>
+<p class="lede">组会材料 · 2026 年 11 月 · 面向做 coding RSI 的同学。前半部分讲清楚现有代码每一块在做什么、为什么这样写；后半部分给出六个可以各自认领的探索方向，每个方向都写了切入的代码位置和第一个实验。</p>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li><a href="#q">我们研究的问题</a></li>
+  <li><a href="#setup">实验设置</a></li>
+  <li><a href="#loop">一轮自我改进在代码里怎么走</a></li>
+  <li><a href="#hgm">HGM 的搜索：什么时候扩展、扩展谁、评估谁</a></li>
+  <li><a href="#dgm">DGM 对照组：同一套框架上的另一种搜索</a></li>
+  <li><a href="#cost">成本怎么计量</a></li>
+  <li><a href="#erl">ERL：用预测决定"别再评了"</a></li>
+  <li><a href="#pitfalls">我们踩过的坑（改代码前必读）</a></li>
+  <li><a href="#protocol">所有方向共用的评价方式</a></li>
+  <li><a href="#dirs">六个开放方向</a></li>
+  <li><a href="#refs">参考文献</a></li>
+</ol>
+</div>
+
+<h2 id="q">1. 我们研究的问题</h2>
+<p>自我改进的编程智能体（coding RSI）反复做同一件事：从已有的智能体里挑一个，让它改写自己的代码，得到一个新版本，再在一批编程题上评估新版本，把成绩记进档案。DGM [2] 和 HGM [1] 都属于这一类，区别主要在"挑谁来改"和"评估谁、评多少"。</p>
+<p>这类方法很贵，而且钱主要花在评估上：每评一道题，都要为这道题单独起一个 Docker 容器（DGM 和 HGM 都这样做，用来隔离环境、实例化具体的智能体版本），智能体在里面用大模型解题、跑测试，解题最长 1 小时。我们的问题是：<strong>在模型不变的前提下，能不能把有限的评估花在真正影响最终选择的地方</strong>，从而在同样的算力下选出同样好甚至更好的智能体。这和"把模型压小"是两条不同的路，我们只动搜索和评估，不动模型。</p>
+<p>衡量标准只有一个：在相同的 GPU 占用小时下，各方法最终选出的智能体在留出题上的准确率。搜索过程中的成绩只用来做决策，不拿来报告，因为它会高估最终选出的智能体，原因有两个。第一是"赢家诅咒"：从几十个有噪声的成绩里挑最高的，挑中的往往是运气好的那个。比如 50 个真实解出率都是 25% 的智能体，各评 20 道题，单个成绩的标准差约 10 个百分点，其中最高的那个看上去能有 45% 左右。第二是搜索本身在对着这 59 道题优化：诊断读的是搜索题上的失败记录，智能体可能学会只对这几道题有效的技巧。166 道留出题在搜索中完全不参与，它们上的成绩才是无偏的估计。</p>
+
+<h2 id="setup">2. 实验设置</h2>
+<table>
+  <tr><th style="width:28%">项目</th><th>设置</th></tr>
+  <tr><td>基准</td><td>Aider 的 Polyglot [3]，225 道题，覆盖 C++、Go、Java、JavaScript、Python、Rust 六种语言。59 道用于搜索，166 道留出，只在最终评估时使用。</td></tr>
+  <tr><td>模型</td><td>Qwen3-Coder-30B-A3B（FP8）[4]，在一张 H100 上用 vLLM 本地部署。解题、诊断和自改都用这一个模型，与 HGM 论文的 Polyglot 设置一致。</td></tr>
+  <tr><td>预算</td><td>所有比较统一截在 9.646 个 GPU 占用小时，每次搜索跑 10.5 小时后停止。见表下的说明。</td></tr>
+  <tr><td>最终选择</td><td>截断点上，取搜索成绩 Beta 后验 5% 分位数最高的节点，所有方法用同一条规则（<span class="path">instrumentation/results.py</span>）。</td></tr>
+  <tr><td>种子</td><td>每种配置 3 次独立运行，方法之间用两层自助法给出置信区间（<span class="path">instrumentation/compare.py</span>）。</td></tr>
+</table>
+<p>为什么按 GPU 小时比较，而不按评估次数：HGM 每次只评一道题，20 个工作线程异步跑，GPU 几乎一直有活；DGM 按代推进，一代要等最慢的那次评估结束才进入下一代，GPU 有很多空闲。同样 800 次评估，DGM 占用 GPU 的时间要长得多。对租 GPU 的人来说，占用时间才是真实成本。</p>
+<p><strong>9.646 和 10.5 这两个数是怎么来的。</strong>第一轮的 9 次运行按评估次数定预算，各跑 800 次评估，所花的 GPU 时间各不相同。要在同样的算力下比较，就要把所有运行截在同一个 GPU 小时数上；运行只能截短、不能补长，所以共同截断点只能取最短的那次，算出来是 9.646 小时（<span class="path">run_all.sh</span> 的 <code>common_hours()</code>）。之后的重跑沿用这个数，以便和第一轮的结果、以及截在同一点上的预测器历史数据保持可比。既然比较只看前 9.646 小时，之后的部分就是白跑（第一轮跑满 800 次要 13 到 20 小时），所以重跑改为按时间停止。GPU 占用小时扣掉了停机间隔，只会不多于墙钟时间，因此墙钟上限要留出余量，取 10.5 小时；评估次数的预算同时调高到 2000，保证先到的总是时间上限。万一某次运行的 GPU 小时仍不足 9.646，<span class="path">final_eval.py</span> 会拒绝评它，避免它以更少的预算参与比较。</p>
+
+<h2 id="loop">3. 一轮自我改进在代码里怎么走</h2>
+<figure>
+<svg viewBox="0 0 840 250" width="100%" role="img" aria-label="一轮自我改进的四个步骤">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8a929c"/></marker></defs>
+  <rect class="svg-box2" x="10" y="40" width="180" height="96" rx="10"/>
+  <text class="svg-t" x="100" y="72" text-anchor="middle">① 选父代</text>
+  <text class="svg-s" x="100" y="96" text-anchor="middle">hgm.py · expand()</text>
+  <text class="svg-s" x="100" y="116" text-anchor="middle">按整棵子树的成绩采样</text>
+  <rect class="svg-box" x="220" y="40" width="190" height="96" rx="10"/>
+  <text class="svg-t" x="315" y="72" text-anchor="middle">② 诊断</text>
+  <text class="svg-s" x="315" y="96" text-anchor="middle">self_improve_step.py</text>
+  <text class="svg-s" x="315" y="116" text-anchor="middle">读一道失败题 → 问题描述</text>
+  <rect class="svg-box" x="440" y="40" width="190" height="96" rx="10"/>
+  <text class="svg-t" x="535" y="72" text-anchor="middle">③ 自改</text>
+  <text class="svg-s" x="535" y="96" text-anchor="middle">hgm_utils.sample_child()</text>
+  <text class="svg-s" x="535" y="116" text-anchor="middle">在容器里改自己 → 补丁</text>
+  <rect class="svg-box2" x="660" y="40" width="170" height="96" rx="10"/>
+  <text class="svg-t" x="745" y="72" text-anchor="middle">④ 评估</text>
+  <text class="svg-s" x="745" y="96" text-anchor="middle">polyglot/harness.py</text>
+  <text class="svg-s" x="745" y="116" text-anchor="middle">一题一容器，跑测试</text>
+  <path class="svg-a" d="M190,88 L218,88" marker-end="url(#ar)"/>
+  <path class="svg-a" d="M410,88 L438,88" marker-end="url(#ar)"/>
+  <path class="svg-a" d="M630,88 L658,88" marker-end="url(#ar)"/>
+  <path class="svg-a" d="M745,136 L745,200 L100,200 L100,140" marker-end="url(#ar)"/>
+  <text class="svg-s" x="422" y="222" text-anchor="middle">成绩写回树上的节点（utility_measures），下一轮选择据此更新</text>
+</svg>
+<figcaption>图 1　一轮自我改进的四个步骤。ERL 的改动只插在 ④ 之前：决定某个节点还值不值得继续评估。</figcaption>
+</figure>
+<p>第 ② 步和第 ③ 步合起来，就是"子代是怎么生出来的"。</p>
+<p><strong>诊断</strong>（<span class="path">self_improve_step.py</span> 的 <code>diagnose_problem()</code>）只是一次大模型调用，不运行任何代码，好比医生看病历开处方。程序先从父代没解出的搜索题里随机挑一道（<code>choose_entry()</code>），把四样东西交给模型：父代智能体自己的代码、它解这道题的完整对话记录、它交的补丁、测试日志。模型按固定格式回一段 JSON：先总结这个智能体是怎么解题的、卡在哪里，再列出可能的改进并挑一个最值得做的，最后把它写成一份类似 GitHub issue 的需求描述。</p>
+<p><strong>自改</strong>（<span class="path">hgm_utils.py</span> 的 <code>sample_child()</code>）让父代智能体给自己"修 bug"。程序起一个容器，在 <span class="path">/hgm</span> 里放好父代的代码（初始代码加上从根节点到父代的所有补丁），提交一次 git；然后运行父代自己的 <span class="path">coding_agent.py</span>，题目就是诊断写出的需求描述，要改的仓库是它自己的代码。改完后和刚才的提交做 diff，得到 <span class="path">model_patch.diff</span>，它只包含这一次的改动。子代等于父代加上这份补丁；评估子代时，按顺序把从根节点到它的所有补丁重新打一遍，就还原出它的代码。</p>
+<p><strong>举个例子。</strong>父代在 <code>rust__macros</code> 上失败了，对话记录显示它改完代码就交卷，从没运行过 <code>cargo test</code>。诊断可能写出这样的需求："智能体提交前不验证自己的改动；建议在主循环里加一步，提交前运行题目给的测试命令，失败就把报错交回模型继续修改。"自改时，父代读到这份需求，在自己的主循环里加上"提交前先跑测试"的逻辑，这段改动就是 <span class="path">model_patch.diff</span>。得到的子代是"会自测的父代"，它是否真的更好，要看接下来的评估。</p>
+<p>可以看出，自改只是照着需求去实现，改哪里、往哪个方向改，是诊断决定的。诊断只看一道失败题，难免以偏概全；第 8 节提到的诊断提示词超长问题，也出在这一步。还要注意，父代智能体的能力在这里用了两次：一次是解 Polyglot 题，一次是改自己的代码。</p>
+<p><strong>评估</strong>时，每道题都会起一个独立的 Docker 容器，评完即删（<span class="path">polyglot/harness.py</span> 的 <code>process_entry()</code>）。这套做法沿用自 DGM [2]，区别只在调度：DGM 一次给一个节点评一批题，HGM 每次只评一道，但都是一题一个容器。这样做有几个原因：</p>
+<ul>
+  <li><strong>每道题要的环境不同。</strong>镜像分三层，做法和 SWE-bench 的评测框架一样：基础层、语言工具链层（Gradle、Cargo、Go、Node、CMake 等）、题目层（这道题的仓库，停在基础提交上，镜像名 <code>pb.eval.&lt;架构&gt;.&lt;题目&gt;</code>）。容器一启动，就是这道题的一份干净副本。</li>
+  <li><strong>智能体不可信。</strong>它能执行任意 shell 命令、改任意文件、在后台留进程，而且它的代码本身就是上一轮自改出来的。容器把它和宿主机、和其他题隔开，评完一删，下一道题不受影响。</li>
+  <li><strong>容器也决定"评的是哪个智能体"。</strong>评测程序把初始智能体的代码拷到 <span class="path">/hgm</span>，再依次打上从根节点到这个节点的所有补丁。不同节点的代码只存在于各自的容器里。</li>
+  <li><strong>并发互不干扰。</strong>HGM 的 20 个工作线程各用各的容器。</li>
+</ul>
+<p>题目仓库放在 <span class="path">/testbed</span>，智能体只拿到题目描述和运行测试的命令，解题时间上限 3600 秒（配置项 <code>evaluation_timeout</code>）。智能体结束后，评测程序在同一个容器里换上带测试的提交，运行测试（上限 120 秒），全部通过才算解出。一道题的时间主要花在解题时与大模型的多轮对话上；起容器、打补丁、安装智能体依赖也有开销，账本里记在 <code>setup</code> 阶段，和 <code>agent_run</code>、<code>test</code> 分开统计。</p>
+
+<h2 id="hgm">4. HGM 的搜索：什么时候扩展、扩展谁、评估谁</h2>
+<p>HGM [1] 把每一步都看成两种动作之一：<strong>扩展</strong>（选一个父代生成新子代）或<strong>评估</strong>（选一个已有节点再评一道题）。主循环在 <span class="path">repos/HGM/hgm.py</span> 的 <code>sample()</code> 里，20 个线程并发调用它。</p>
+<h3>4.1 扩展还是评估</h3>
+<p>判断条件是一行代码：当已完成的评估次数 n 满足 n<sup>α</sup> ≥ 当前子代数时就扩展，否则评估，这里 α = 0.6。直观地说，节点数随评估次数次线性增长：评估越多，越倾向于把预算花在把已有节点评准，而不是不停地生新节点。</p>
+<h3>4.2 扩展谁：看整棵子树</h3>
+<p>这是 HGM 和 DGM 最本质的区别。HGM 认为一个节点值不值得扩展，不只看它自己的成绩，而要看它整个后代谱系（clade）的成绩，论文称之为谱系元生产力（clade-metaproductivity）[1]。代码里，<code>Node.get_decendant_evals()</code>（<span class="path">tree.py</span>）把节点自己和所有后代的逐题成绩拼在一起，再用 Thompson 采样选父代：每个候选节点从 Beta(1 + 解出数, 1 + 未解出数) 里抽一个数，取最大的那个（<code>TS_sample()</code>）。成绩越好、证据越多，被选中的概率越高；证据少的节点也有机会被抽中，这就是探索。</p>
+<h3>4.3 评估谁：看节点自己</h3>
+<p>评估时同样做 Thompson 采样，但只用节点自己的成绩。选中的节点再从它还没做过的搜索题里随机抽一道。所以 HGM 的评估是一道一道"零售"的，好节点自然积累更多评估，差节点只评几道就很少再被选中。这种逐题粒度也是 ERL 能在中途叫停的前提。</p>
+
+<h2 id="dgm">5. DGM 对照组：同一套框架上的另一种搜索</h2>
+<p>为了只比较搜索策略，我们没有用 DGM 自己的代码，而是在 HGM 的框架上重写了 DGM [2] 的外层循环（<span class="path">repos/HGM/dgm_search.py</span>，用 <code>hgm.py --search dgm</code> 启动）。初始智能体、诊断和自改步骤、评测程序、模型都相同，差别只在下面几条规则：</p>
+<ul>
+  <li><strong>按代推进。</strong>每一代选 4 个父代（有放回抽样），各生成一个子代，4 个子代都评完才进入下一代。</li>
+  <li><strong>选父代的权重</strong>是 sigmoid(10 × (准确率 − 0.5)) ÷ (1 + 已有子代数)：成绩好的优先，但已经生过很多子代的会被降权。</li>
+  <li><strong>分段评估。</strong>子代先评 10 道小集合，解出不少于 40% 才继续评 50 道中集合。</li>
+  <li><strong>档案全收。</strong>只要生成了补丁并评完小集合，子代就进入档案，以后都可能被选为父代。</li>
+</ul>
+<p>和 DGM 公开代码的几处有意差别（比如父代准确率用全部已评题目，而不是只用 10 题的小集合），都写在文件开头的说明里，也写进了报告的披露部分。</p>
+
+<h2 id="cost">6. 成本怎么计量</h2>
+<p>智能体会改写自己的代码，包括调用大模型的 <span class="path">llm.py</span>。如果把计量代码放进智能体，被测对象本身就被改变了，智能体也可能把计量代码改掉。所以我们把计量放在智能体外面：</p>
+<ul>
+  <li><strong>代理</strong>（<span class="path">instrumentation/llm_proxy.py</span>）：容器里的每次模型调用都经过它，地址里带着"哪个环节、哪个节点、哪道题"的标签。代理原样转发请求，同时记下 token 数。</li>
+  <li><strong>账本</strong>（<span class="path">runs/ledger.jsonl</span>）：所有事件都写进同一个 JSONL 文件，包括每次调用、每道题各阶段的耗时、选了谁当父代、生成了哪个子代、停掉了哪个节点。</li>
+  <li><strong>GPU 占用小时</strong>（<span class="path">instrumentation/analyze_ledger.py</span>）：一次运行从第一条到最后一条事件的墙钟时间，扣掉 30 分钟以上没有任何事件的停机间隔。<code>--max-hours</code> 按这个口径截断，做等预算比较。</li>
+</ul>
+<div class="note">账本是所有离线实验的数据源。六个方向的第一步实验，基本都可以只读账本和输出目录完成，不用占 GPU。</div>
+
+<h2 id="erl">7. ERL：用预测决定"别再评了"</h2>
+<p>ERL 是我们在 HGM 上加的节点停止机制（<span class="path">erl/online_stop.py</span>，<code>HGM_ERL_STOP=1</code> 打开）。它要回答的问题是：某个子代已经评了几道题，它还有没有可能成为最终被选中的那个？如果几乎不可能，后面的评估就是浪费。</p>
+<h3>7.1 停止规则</h3>
+<p>对每个子代维护一个 Beta 后验。纯统计版本是 Beta(1 + 解出, 1 + 未解出)；预测版本再加上一个先验：</p>
+<pre>Beta(1 + 解出 + w·p̂,  1 + 未解出 + w·(1 − p̂))</pre>
+<p>其中 p̂ 是预测器给出的"这个子代最终的解出率"，w 表示预测值抵得上几道题的证据。子代至少评满 3 道题后，如果它后验的 80% 上界低于当前最优节点（incumbent）的 5% 下界，就停止评估。被停的节点仍然留在树里，可以继续当父代；最终选择只看真实成绩，预测不会直接给任何节点打分。</p>
+<h3>7.2 预测器</h3>
+<p>预测器是梯度提升回归（<span class="path">erl/predict_stop.py</span>），特征包括：补丁的形态（改了几个文件、增删多少行、动没动主循环、工具或模型客户端，见 <span class="path">instrumentation/prescreen/predict_from_diff.py</span>）、父代当时的成绩、在树里的深度，以及前 k 道题的结果和耗时。每多 50 个结果重训一次，只用当时已经观察到的数据。训练集里还可以加入以前跑完的运行（<span class="path">runs/erl_history.json</span>），这一点借鉴了 EarlyEval 的思路：同一基准上已有的带标签记录很有价值。这个文件是运行产物，不在代码仓库里：先跑完几次搜索，再用 <code>python erl/online_stop.py dump-history</code> 从账本生成；没有它时，预测器只用本次搜索的数据训练。</p>
+<h3>7.3 w 怎么定</h3>
+<p>w 固定为 5 会选错，w 取 10 以上时几乎所有子代都被停掉。现在用的是自动 w：只拿预测之后才得到的结果来检验预测（样本外），估计真实解出率围绕预测值的离散程度，再换算成 w。预测器在本次搜索里还没证明过自己时，w = 0，策略退回纯统计。第一版用全部结果做标签，结果被停的子代只剩下导致它被停的那几题，预测看起来特别准，w 一路涨到上限。这个教训对方向 3、4、6 都适用。</p>
+<h3>7.4 离线回放的结果</h3>
+<p>在第一轮 6 次 HGM 运行的账本上回放，每次运行把结果顺序随机打乱 20 次，共 120 种顺序：</p>
+<table>
+  <tr><th>设置</th><th>平均省下的评估时间</th><th>选择改变的顺序</th><th>最大损失</th></tr>
+  <tr><td>纯统计（w = 0）</td><td>17.2%</td><td>7 / 120</td><td>2.3 个百分点</td></tr>
+  <tr><td>自动 w</td><td>27.4%</td><td>13 / 120</td><td>8.4 个百分点</td></tr>
+  <tr><td>自动 w + 单题有条件超时</td><td>34.1%</td><td>12 / 120</td><td>8.4 个百分点</td></tr>
+</table>
+<p>"损失"指新选出的节点比原来选出的节点，在全部搜索结果上的解出率低多少。预测能多省大约 10 个百分点的评估，代价是小概率的大损失：8.4 个百分点的损失都出在同一次运行的同一批顺序上，预测器过早停掉了真正的最优节点。<strong>"省多少"和"偶尔错得多严重"之间的取舍，就是方向 6 要系统研究的问题。</strong></p>
+<p>在线版本还有两个变体：<code>hgm-erlx</code> 让停止腾出的预算用来生成新子代；<code>hgm-erlxa</code> 在此基础上抽 10% 的停止决定做审计，多评 5 道题检验停得对不对，停错太多就把 w 的上限减半。</p>
+
+<h2 id="pitfalls">8. 我们踩过的坑（改代码前必读）</h2>
+<p>下面几个问题都是在跑实验的过程中发现的，每一个都会让比较结论失真。它们现在都有开关，默认值保持上游行为，报告里逐条披露。</p>
+<div class="warn"><strong>答案对解题智能体可见。</strong>上游的题目镜像里留着原始题目文件夹（含测试和 <code>.meta/</code> 里的参考答案），<code>/testbed</code> 的 git 历史里也能找到带测试的提交。我们在 v2 的约 2750 份解题记录里查到 17 份读过隐藏测试、1 份用 <code>git log --all</code> 翻到了答案提交，没有一份读过参考答案，子代代码里也没有学会这一招。现在 <code>HGM_HIDE_ANSWERS=1</code> 会在建镜像时删掉这些内容，评分前再从宿主机取回测试。智能体容器仍然联网，理论上可以下载公开的基准，这一点还没有解决。</div>
+<div class="warn"><strong>诊断提示词超长。</strong>上游把父代的补丁和代码原样塞进诊断提示词，有的补丁长达几千万字符，远超模型 131k token 的上下文，调用直接被拒，这次扩展失败，搜索又选同一个父代。第一轮 9 次运行里，39% 到 99% 的扩展这样失败。<code>HGM_DIAG_CLIP=1</code> 按段截断提示词，v2 里这类失败几乎消失。</div>
+<div class="warn"><strong>后代成绩被原地修改。</strong>上游 <span class="path">tree.py</span> 在拼接后代成绩时直接改了节点自己的成绩列表，导致节点越评越"像"它的后代。这个错误来自上游 2025-11-24 的一次清理提交，晚于论文。修复默认开启，<code>HGM_FIX_DESCENDANT_EVALS=0</code> 可以恢复上游行为做对照。</div>
+<p class="small">另外两点：DGM 在代与代之间检查时间上限，所以会多跑最多一代（v2 里多跑了约半小时），比较时一律截在 9.646 GPU 小时，多出的部分不进入比较。服务器上同时跑别的重负载 CPU 任务会拖慢评估容器，而且这部分时间会算到当时那次运行头上，所以离线分析请用 <code>nice</code>/<code>ionice</code> 降低优先级。</p>
+<div class="note"><strong>数据现状。</strong>第一轮 9 次运行和 v2 都是在答案可见的条件下跑的，第一轮还有诊断超长的问题。离线方法可以先在这些数据上开发，结论以 v3（答案隐藏、诊断截断，正在重跑）的数据为准。</div>
+
+<h2 id="protocol">9. 所有方向共用的评价方式</h2>
+<p>六个方向本质上都在回答同一个问题：<strong>花一点成本去预测，换来少做一些评估，值不值？</strong>为了让大家的结果能放在一起比较，建议统一用下面的口径：</p>
+<ol>
+  <li><strong>先离线回放，再上线。</strong>用 <span class="path">erl/replay.py</span> 在账本上按真实到达顺序重放每个节点的结果，截在 9.646 GPU 小时；用 <span class="path">erl/predict_robust.py</span> 的同一组 20 种随机顺序检验稳健性。离线站得住，再接进 <span class="path">hgm.py</span> 在线跑。</li>
+  <li><strong>报告四个数。</strong>省下的评估时间（占比）；选择改变的顺序比例；损失（新选择比原选择低多少个百分点，看平均和最大）；预测本身的成本（GPU 小时或 token，记在同一个账本里，和节省用同一个单位）。</li>
+  <li><strong>和两个基线比。</strong>纯统计停止（w = 0），以及当前的自动 w。新方法要么在同样的选错率下省得更多，要么在同样的节省下选错更少。</li>
+  <li><strong>防止信息泄漏。</strong>预测器只能用决策时刻之前已经发生的事情训练和校准，尤其不能用"被自己停掉的节点"来证明自己预测得准。</li>
+</ol>
+
+<h2 id="dirs">10. 六个开放方向</h2>
+<p>每个方向都写了研究问题、为什么值得做、从哪段代码切入、第一个实验和怎样算成功。方向之间可以组合，方向 6 本身就是一个"组合"方向。</p>
+
+<div class="card">
+<h3>方向 1　EarlyEval 式的单题预测与早停</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>一道题刚解到一半，能不能根据智能体到目前为止的行为（看了哪些文件、改了几次、测试报了什么错）判断这次注定失败，从而提前结束这道题？</dd>
+  <dt>为什么值得做</dt>
+  <dd>ERL 是在题与题之间决定"不再评这个节点"，单题早停是在一道题内部省时间，两者可以叠加。离线结果显示，30 分钟时问一次分类器、失败概率不低于 0.9 才停（有条件超时），6 次运行的选择都不变，叠加节点停止后平均省 22%。但这一版只在单题结束时间上做文章，还没有用上对话内容本身。</dd>
+  <dt>代码切入点</dt>
+  <dd><span class="path">instrumentation/early_stop/</span>：解析对话记录（<span class="path">trajectories.py</span>）、前缀特征（<span class="path">features.py</span>）、按时间切分的离线模拟（<span class="path">simulate.py</span>）；<span class="path">erl/micro_stop.py</span>：把单题早停的结果流接到节点级回放上。</dd>
+  <dt>第一个实验</dt>
+  <dd>在 v3 的对话记录上重训前缀分类器，比较只用行为计数特征和加入测试输出文本特征两种做法的 AUC，再用 <span class="path">micro_stop.py</span> 看最终选择会不会因此改变。</dd>
+  <dt>怎样算成功</dt>
+  <dd>在"选择不变"的前提下，单题早停省下的时间明显高于现有的有条件超时；被停掉但本来能解出的题，每次运行不超过几次。</dd>
+</dl>
+</div>
+
+<div class="card">
+<h3>方向 2　小模型能不能当低成本的代理评估</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>让候选智能体先用一个更小、更便宜的模型解题，它的成绩能不能预测同一个智能体用 30B 模型时的表现？更重要的是，能不能预测智能体之间的排名？</dd>
+  <dt>为什么值得做</dt>
+  <dd>评估成本的大头是解题时的模型推理。如果小模型的成绩和大模型高度相关，就可以先用小模型筛掉明显不行的候选，只把大模型留给有希望的那些。</dd>
+  <dt>代码切入点</dt>
+  <dd>模型名在 <span class="path">config_local.yaml</span> 里配置，评测程序不用改；计划中的 <span class="path">erl/proxy.py</span>（配对评估、在线回归、conformal 下界）还没写，可以从这里开始。</dd>
+  <dt>第一个实验</dt>
+  <dd>从 v3 里挑 20 到 30 个已经评得比较充分的节点，用小模型在同样的搜索题上各评一遍，算两套成绩的 Spearman 相关和"最好的节点是否一致"。再用 conformal 预测 [5] 给出"大模型成绩至少是多少"的下界，接到 ERL 的停止规则里。</dd>
+  <dt>怎样算成功</dt>
+  <dd>小模型的评估成本加上误判造成的损失，低于它省下的大模型评估。要特别注意一个风险：智能体的改动可能只对某个模型有效（比如针对大模型的提示词技巧），这会让相关性在搜索后期下降。</dd>
+</dl>
+</div>
+
+<div class="card">
+<h3>方向 3　RSI 迭代过程中，下界会不会变</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>停止规则拿子代的上界和当前最优节点的下界比较。随着搜索推进，当前最优的下界在上升，子代的分布也在变（越来越深、补丁越来越复杂）。这两件事会怎样影响停止决定？预测器在搜索后期还准不准？</dd>
+  <dt>为什么值得做</dt>
+  <dd>预测器的历史数据来自更早的运行，而自我改进本身就在不断制造分布漂移：后期的子代和训练数据里的子代不是同一个总体。如果预测误差随深度或时间系统性变大，自动 w 就应该随之下降；如果下界上升得快，后期停得多，省下的评估可能主要集中在后期。</dd>
+  <dt>代码切入点</dt>
+  <dd>账本里的 <code>erl_fit</code> 事件记录了每次重训的 w 和校准量，<code>erl_retire</code> 记录了每次停止；<span class="path">erl/replay.py</span> 可以逐时刻重建当前最优的下界。</dd>
+  <dt>第一个实验</dt>
+  <dd>把每次运行按 GPU 小时分成 4 段，画出当前最优下界的轨迹、每段的停止次数，以及预测误差（MAE）随深度和时间的变化，比较历史数据训练的预测器在各段的表现。</dd>
+  <dt>怎样算成功</dt>
+  <dd>找到一个可以量化的规律（比如"深度每加 1，误差增加多少"），并据此改进 w 的校准，在回放中减少后期的错停。</dd>
+</dl>
+</div>
+
+<div class="card">
+<h3>方向 4　早停阈值能不能动态调整</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>现在的阈值是固定的：80% 上界、至少 3 题。能不能让它随剩余预算、当前最优的确定程度，或者审计发现的停错率自动调整？</dd>
+  <dt>为什么值得做</dt>
+  <dd>离线结果显示，阈值从 80% 换到 90%，省下的时间从约 15% 掉到个位数，这个数很敏感。直觉上，搜索早期当前最优还不稳定，应该保守一些；预算快用完时，再评一个没希望的子代几乎没有价值，应该激进一些。HGM 自己的 Thompson 采样也有随预算"降温"的选项（<code>cool_down</code>），可以借鉴。</dd>
+  <dt>代码切入点</dt>
+  <dd><span class="path">erl/policy.py</span> 是停止策略的接口，新策略只要实现"继续还是停止"一个方法；<span class="path">erl/online_stop.py</span> 里的 <code>alpha</code>、<code>min_evals</code> 和审计逻辑（停错率超过 20% 时把 w 的上限减半）是现成的动态调整示例。</dd>
+  <dt>第一个实验</dt>
+  <dd>实现两个简单的动态版本：一个让 alpha 随已用预算线性变化，一个按审计停错率调整 alpha。在同一组 20 种顺序上，和固定阈值比较节省与损失的取舍曲线。</dd>
+  <dt>怎样算成功</dt>
+  <dd>动态阈值的取舍曲线整体位于固定阈值曲线的上方：同样的损失下省得更多。也可以从"评估的信息价值"的角度推导一个有理论依据的阈值。</dd>
+</dl>
+</div>
+
+<div class="card">
+<h3>方向 5　相邻两轮的 harness 变化能不能帮助预测</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>子代和父代之间只差一份补丁。能不能直接从这份补丁（改了智能体的哪部分、怎么改的）预测子代比父代好还是差，而不是预测子代的绝对成绩？</dd>
+  <dt>为什么值得做</dt>
+  <dd>补丁在评估开始之前就已经有了，基于补丁的预测不花任何评估成本。现在的预测器只用了补丁的粗粒度形态特征（行数、文件数、动没动工具）。我们试过"父代做对、子代做错"的配对特征，前 3 题里平均不到 1 道是父代做对的，信息太少，没有改善。补丁的语义内容还完全没有用上。</dd>
+  <dt>代码切入点</dt>
+  <dd>每个节点的补丁在 <span class="path">output_hgm/&lt;运行&gt;/&lt;节点&gt;/model_patch.diff</span>，诊断文本在同目录的 <span class="path">self_improve.log</span>；现有特征在 <span class="path">instrumentation/prescreen/predict_from_diff.py</span>，它按"留一个运行"评估，避免预测器见过它要预测的运行。</dd>
+  <dt>第一个实验</dt>
+  <dd>把预测目标从"子代解出率"改成"子代减父代的解出率"，加入更细的补丁特征（改的是提示词、工具实现还是控制流；有没有引入语法错误或导入失败），比较留一运行的 AUC。也可以试试用模型给补丁打一个"会不会改坏"的分数，但这个分数的 token 成本要记进账本。</dd>
+  <dt>怎样算成功</dt>
+  <dd>能在评估开始前可靠地识别出"改坏了"的子代（比如成绩为 0 的那些），从而直接跳过或缩短它们的评估。</dd>
+</dl>
+</div>
+
+<div class="card">
+<h3>方向 6　组合多种预测信号，比较成本、节省和误判代价</h3>
+<dl>
+  <dt>研究问题</dt>
+  <dd>上面每个方向都会产生一种预测信号：前缀行为、小模型成绩、补丁内容、早期题目结果。它们怎样组合最好？每种信号本身也有成本，怎样在预测成本、评估节省和误判代价之间做出最优取舍？</dd>
+  <dt>为什么值得做</dt>
+  <dd>单一信号往往只在某个阶段有用：补丁信号在评估开始前有用，早期结果在评了几题之后有用，前缀信号在一道题内部有用。另外，离线结果已经表明，预测带来的风险不在平均损失，而在小概率的大损失（8.4 个百分点）。只看平均值会低估风险。</dd>
+  <dt>代码切入点</dt>
+  <dd>ERL 的 Beta 先验天然支持组合：不同信号可以各自给一个 p̂ 和一个 w，或者先合成一个 p̂ 再整体校准。<span class="path">erl/predict_robust.py</span> 已经有在同一组顺序上比较多种设置的框架。</dd>
+  <dt>第一个实验</dt>
+  <dd>把纯统计、自动 w、自动 w + 单题超时，以及方向 1 到 5 做出来的新信号放在同一张图上：横轴是总成本（评估成本加预测成本），纵轴是最终选择的损失，画出帕累托前沿。分别报告平均损失和最大损失。</dd>
+  <dt>怎样算成功</dt>
+  <dd>找到一个组合，它在前沿上严格优于现有的自动 w。更理想的是总结出一条可以推广的规则，说明什么阶段该信任哪种信号。</dd>
+</dl>
+</div>
+
+<h2>认领和协作</h2>
+<ul>
+  <li>先在第一轮和 v2 的账本上把方法跑通，等 v3 跑完再用 v3 的数据出结论。</li>
+  <li>环境搭建和运行步骤以仓库根目录的 <span class="path">README.md</span> 为准，主实验的细节见 <span class="path">RERUN_V2.md</span>。</li>
+  <li>离线分析在服务器上跑时，请用 <code>nice -n 19 ionice -c3</code> 降低优先级：评估容器被拖慢的时间会算进当时那次运行的 GPU 小时。</li>
+  <li>每改一处上游代码或实验设置，都加一个默认关闭的开关，并写进 <span class="path">repos/HGM/MODIFICATIONS.md</span> 和报告的披露部分。</li>
+  <li>新的停止策略请附单元测试：<span class="path">erl/test_online_stop.py</span> 检查在线停止器和离线回放在同一结果流上的决定完全一致，可以照着写。</li>
+</ul>
+
+<h2 id="refs">参考文献</h2>
+<ol class="refs">
+  <li>W. Wang, P. Piękos, L. Nanbo, F. Laakom, Y. Chen, M. Ostaszewski, M. Zhuge, J. Schmidhuber. <em>Huxley-Gödel Machine: Human-Level Coding Agent Development by an Approximation of the Optimal Self-Improving Machine.</em> arXiv:2510.21614, 2025.</li>
+  <li>J. Zhang, S. Hu, C. Lu, R. Lange, J. Clune. <em>Darwin Gödel Machine: Open-Ended Evolution of Self-Improving Agents.</em> arXiv:2505.22954, 2025.</li>
+  <li>Aider. <em>Polyglot benchmark.</em> github.com/Aider-AI/polyglot-benchmark（实验固定在提交 7e0611e）。</li>
+  <li>Qwen Team. <em>Qwen3-Coder-30B-A3B-Instruct-FP8</em>（模型卡）. huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8.</li>
+  <li>A. N. Angelopoulos, S. Bates. <em>A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification.</em> arXiv:2107.07511, 2021.</li>
+</ol>
+<p class="small">EarlyEval 的出处见项目调研文档。文中的数字来自项目代码仓库里的 <span class="path">erl/README.md</span>、<span class="path">instrumentation/early_stop/README.md</span>，以及 2026 年 11 月对 v2 运行记录的检查。</p>
+
+</main>
+</body>
+</html>

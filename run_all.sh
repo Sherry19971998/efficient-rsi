@@ -28,6 +28,8 @@
 #                     hgm-erlxa = hgm-erlx with 10% audited)
 #   HGM_MAX_HOURS=    HGM runs also stop (no new expansion or evaluation) after this many hours
 #   HGM_DIAG_CLIP=1   clip the diagnose prompt to fit the model's context (v2 fix; see RERUN_V2.md)
+#   HGM_HIDE_ANSWERS=1  keep each task's tests and reference solution out of the agent's container
+#                     while it solves the task (polyglot/test_spec.py); images get a ".hidden" name
 #   FINAL_HOURS=      final: cut every run at these GPU hours instead of the shortest run's
 #                     (hgm-erl runs are cut at the first nine runs' 9.646 h)
 #   PARALLEL=0        1 = run the configs of one repeat concurrently. The pilot showed one run
@@ -92,7 +94,7 @@ record_setup() {  # what produced this run, for the experiment log
     echo "label: $label"; date
     echo "HGM commit: $(git -C "$HGM" rev-parse HEAD) dirty: $(git -C "$HGM" status --porcelain | wc -l | tr -d ' ') files"
     echo "HGM_FIX_DESCENDANT_EVALS=${HGM_FIX_DESCENDANT_EVALS:-1}"
-    echo "HGM_DIAG_CLIP=${HGM_DIAG_CLIP:-0} HGM_MAX_HOURS=${HGM_MAX_HOURS:-} DGM_MAX_HOURS=${DGM_MAX_HOURS:-}"
+    echo "HGM_DIAG_CLIP=${HGM_DIAG_CLIP:-0} HGM_MAX_HOURS=${HGM_MAX_HOURS:-} DGM_MAX_HOURS=${DGM_MAX_HOURS:-} HGM_HIDE_ANSWERS=${HGM_HIDE_ANSWERS:-0}"
     echo "HGM_ERL_STOP=${HGM_ERL_STOP:-0} HGM_ERL_EXPAND=${HGM_ERL_EXPAND:-0} HGM_ERL_HISTORY=${HGM_ERL_HISTORY:-} W=${HGM_ERL_W:-auto} ALPHA=${HGM_ERL_ALPHA:-0.2} MIN_EVALS=${HGM_ERL_MIN_EVALS:-3} AUDIT=${HGM_ERL_AUDIT:-0} AUDIT_N=${HGM_ERL_AUDIT_N:-5}"
     [[ -n "${HGM_ERL_HISTORY:-}" ]] && echo "history sha256: $(sha256sum "$HGM_ERL_HISTORY" | cut -c1-16)"
     echo "config: $CONFIG"; cat "$HGM/$CONFIG"

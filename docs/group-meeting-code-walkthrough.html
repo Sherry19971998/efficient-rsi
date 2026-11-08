@@ -15,9 +15,10 @@
   }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 16px/1.7 "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif; }
-  main { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  main { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
   h1 { font-size: 28px; line-height: 1.35; margin: 0 0 6px; }
   h2 { font-size: 21px; margin: 40px 0 10px; color: var(--accent); }
+  h3 { font-size: 17px; margin: 22px 0 6px; }
   p { margin: 8px 0; }
   .lede { color: var(--muted); margin-bottom: 20px; }
   code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.86em;
@@ -25,7 +26,7 @@
   table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 15px; }
   th, td { text-align: left; vertical-align: top; padding: 8px 10px; border: 1px solid var(--line); }
   th { background: var(--head); font-weight: 600; white-space: nowrap; }
-  td:first-child { font-weight: 600; white-space: nowrap; }
+  td:first-child { font-weight: 600; }
   .refs li { font-size: 14.5px; }
   .small { font-size: 14px; color: var(--muted); }
 </style>
@@ -36,96 +37,123 @@
 <h1>计算高效的编程智能体自我改进：代码导读与开放方向</h1>
 <p class="lede">组会材料 · 2026 年 11 月。环境搭建和运行步骤见仓库根目录的 <code>README.md</code>。</p>
 
-<h2>1. 我们在做什么</h2>
+<h2>1. 研究问题</h2>
 <table>
-  <tr><th>问题</th><th>说明</th></tr>
-  <tr><td>研究对象</td><td>自我改进的编程智能体（coding RSI），如 DGM [2]、HGM [1]：智能体反复改写自己的代码，在编程题上评估新版本，留下好的。</td></tr>
-  <tr><td>成本在哪</td><td>主要在评估。每道题要单独起一个容器、用大模型解题、跑测试。智能体解一道题最长 1 小时（HGM 论文附录 C.1 的设置 [1]，配置项 <code>evaluation_timeout</code>），之后跑测试最长 2 分钟。</td></tr>
-  <tr><td>我们的目标</td><td>模型不变，只改搜索和评估：把有限的评估花在真正影响最终选择的地方。</td></tr>
-  <tr><td>怎么算好</td><td>在相同的 GPU 占用小时下，最终选出的智能体在留出题上的准确率更高。</td></tr>
+  <tr><th>项目</th><th>说明</th></tr>
+  <tr><td>研究对象</td><td>递归自我改进（recursive self-improvement, RSI）的编程智能体，如 DGM [2] 和 HGM [1]。智能体反复改写自己的代码，在编程题上评估新版本，保留表现好的版本。</td></tr>
+  <tr><td>成本来源</td><td>主要是评估。每道题都在独立的 Docker 容器中运行：智能体调用大模型解题，再运行测试。解题时间上限 1 小时（HGM 论文附录 C.1 [1]，配置项 <code>evaluation_timeout</code>），测试上限 2 分钟。</td></tr>
+  <tr><td>研究目标</td><td>模型固定，只改进搜索与评估策略，把有限的评估预算分配给真正影响最终选择的候选。</td></tr>
+  <tr><td>评价标准</td><td>在相同的 GPU 占用小时下，最终选出的智能体在留出题上的准确率。</td></tr>
 </table>
 
 <h2>2. 实验设置</h2>
 <table>
-  <tr><th>项目</th><th>设置</th><th>为什么</th></tr>
-  <tr><td>基准</td><td>Polyglot [3]，225 道题、6 种语言；59 道用于搜索，166 道留出</td><td>留出题在搜索中完全不用，它们上的成绩才是无偏的</td></tr>
-  <tr><td>模型</td><td>Qwen3-Coder-30B-A3B（FP8）[4]，一张 H100 上用 vLLM 部署</td><td>与 HGM 论文的 Polyglot 设置一致</td></tr>
-  <tr><td>比较口径</td><td>所有方法统一截在 9.646 个 GPU 占用小时，并在 1/3、2/3 处各看一次（<code>./run_all.sh checkpoints</code>）</td><td>等算力比较才公平；预算在看到结果之前就已固定，取自第一轮最短的运行</td></tr>
-  <tr><td>搜索时长</td><td>每次搜索跑 10.5 小时后停止</td><td>工程余量，保证每次都能跑过截断点；搜索本身不知道这个上限，所以截断不影响搜索行为</td></tr>
-  <tr><td>最终选择</td><td>截断点上，取搜索成绩 Beta 后验 5% 分位数最高的节点</td><td>所有方法用同一条规则（<code>instrumentation/results.py</code>）</td></tr>
-  <tr><td>重复次数</td><td>每种配置 3 次独立运行，自助法给出置信区间</td><td><code>instrumentation/compare.py</code></td></tr>
+  <tr><th>项目</th><th>设置</th><th>依据</th></tr>
+  <tr><td>基准</td><td>Polyglot [3]，225 道题、6 种编程语言；59 道用于搜索，166 道留出</td><td>留出题不参与搜索中的任何决策，其上的准确率是无偏估计</td></tr>
+  <tr><td>模型</td><td>Qwen3-Coder-30B-A3B（FP8）[4]，在一张 H100 上用 vLLM 部署</td><td>与 HGM 论文的 Polyglot 设置一致</td></tr>
+  <tr><td>比较口径</td><td>所有方法统一截在 9.646 个 GPU 占用小时，并在预算的 1/3、2/3 处各评估一次（<code>./run_all.sh checkpoints</code>）</td><td>等成本比较（compute-matched comparison）。预算在看到结果之前固定，取自第一轮最短的运行</td></tr>
+  <tr><td>搜索时长</td><td>每次搜索运行 10.5 小时后停止</td><td>保证每次运行都超过截断点的工程余量；搜索策略本身不读取这个上限，截断不改变搜索行为</td></tr>
+  <tr><td>最终选择</td><td>在截断点上，选搜索成绩 Beta 后验 5% 分位数最高的节点</td><td>所有方法使用同一条规则（<code>instrumentation/results.py</code>）</td></tr>
+  <tr><td>重复次数</td><td>每种配置 3 次独立运行，用自助法（bootstrap）给出置信区间</td><td><code>instrumentation/compare.py</code></td></tr>
 </table>
-<p class="small">为什么不报告搜索成绩：从几十个有噪声的成绩里挑最高的，挑中的往往是运气好的那个（赢家诅咒）；而且搜索一直在对着这 59 道题优化。所以搜索成绩只用来做决策。为什么按 GPU 小时而不按评估次数比较：HGM 让 GPU 一直有活，DGM 按代推进、空闲多，同样的评估次数，DGM 占用 GPU 的时间长得多。</p>
-<p class="small">口径的局限：GPU 占用小时是墙钟时间，服务器上别人的 CPU 负载也会算进来，建议同时报告评估次数和 token 数作为辅助口径；截断时未完成的评估被丢弃，DGM 按代推进，丢得比 HGM 多；9.646 小时与这台机器的硬件绑定，换机器后只能在同一台机器上比较各方法，不能直接比绝对数字。</p>
+<p class="small">为什么不报告搜索成绩：从大量带噪声的估计中选最大值，选中的往往是被高估的那个（赢家诅咒，winner's curse）；而且搜索过程一直针对这 59 道题优化。因此搜索成绩只用于决策。为什么按 GPU 小时而不按评估次数比较：HGM 异步调度，GPU 持续有负载；DGM 按代同步，等待期间 GPU 空闲，相同评估次数下占用 GPU 的时间明显更长。</p>
+<p class="small">口径的局限：GPU 占用小时按墙钟时间计，会受服务器上其他任务的 CPU 负载影响，建议同时报告评估次数和 token 数作为辅助口径；截断时尚未完成的评估被丢弃，DGM 按代推进，丢弃的工作量多于 HGM；9.646 小时与本机硬件绑定，换机器后只能在同一台机器上比较各方法。</p>
 
-<h2>3. 一轮自我改进</h2>
+<h2>3. 自我改进的一轮迭代</h2>
 <table>
   <tr><th>步骤</th><th>做什么</th><th>代码位置</th></tr>
-  <tr><td>① 选父代</td><td>从已有的智能体里选一个来改（HGM 和 DGM 的选法不同，见第 4 节）</td><td><code>hgm.py</code> 的 <code>expand()</code></td></tr>
-  <tr><td>② 诊断</td><td>一次大模型调用，不运行代码。挑父代做错的一道题，把父代的代码、对话记录、补丁、测试日志交给模型，模型写出"哪里不行、怎么改"的需求描述</td><td><code>self_improve_step.py</code> 的 <code>diagnose_problem()</code></td></tr>
-  <tr><td>③ 自改</td><td>把需求描述当成一道编程题，交给父代智能体自己去解，要改的仓库是它自己的代码。改动保存为 <code>model_patch.diff</code>；子代 = 父代 + 这份补丁</td><td><code>hgm_utils.py</code> 的 <code>sample_child()</code></td></tr>
-  <tr><td>④ 评估</td><td>子代在搜索题上解题。每道题一个容器：里面是这道题的仓库和工具链，以及这个子代的代码；智能体结束后换上测试来评分，评完删掉容器</td><td><code>polyglot/harness.py</code> 的 <code>process_entry()</code></td></tr>
+  <tr><td>① 选父代</td><td>从已有版本中选一个作为修改对象（HGM 与 DGM 的规则不同，见第 4 节）</td><td><code>hgm.py</code> 的 <code>expand()</code></td></tr>
+  <tr><td>② 诊断</td><td>一次大模型调用，不执行代码。随机选一道父代未解出的题，把父代的代码、解题记录、补丁和测试日志交给模型，模型输出"问题在哪、如何改进"的需求描述</td><td><code>self_improve_step.py</code> 的 <code>diagnose_problem()</code></td></tr>
+  <tr><td>③ 自改</td><td>把需求描述作为一道编程任务交给父代智能体，修改对象是它自己的代码仓库。改动保存为 <code>model_patch.diff</code>，子代 = 父代 + 该补丁</td><td><code>hgm_utils.py</code> 的 <code>sample_child()</code></td></tr>
+  <tr><td>④ 评估</td><td>子代在搜索题上解题。每道题一个容器，内含该题的仓库与工具链以及该子代的代码；智能体结束后放入测试并评分，随后删除容器</td><td><code>polyglot/harness.py</code> 的 <code>process_entry()</code></td></tr>
 </table>
-<p class="small">例子：父代在一道 Rust 题上改完代码就交卷，从没跑过测试。诊断写出"提交前应先运行测试"，自改时父代在自己的主循环里加上这一步，就得到了"会自测"的子代；它是否更好，要看评估。</p>
+<p class="small">示例：父代在一道 Rust 题上修改代码后直接提交，从未运行测试。诊断给出"提交前应先运行测试"的需求；自改时父代在自己的主循环中加入这一步，得到"会自测"的子代。它是否更好，由评估决定。</p>
 
-<h2>4. HGM 和 DGM 的搜索有什么不同</h2>
-<p>两者用同一套框架（初始智能体、诊断、自改、评测、模型都相同），只有搜索规则不同，所以比较的就是搜索策略本身。</p>
+<h2>4. 搜索策略：HGM 与 DGM</h2>
+<p>两者共用同一套框架（初始智能体、诊断、自改、评测和模型均相同），只有搜索规则不同，因此比较的是搜索策略本身。</p>
 <table>
-  <tr><th></th><th>HGM [1]（<code>hgm.py</code>）</th><th>DGM [2]（<code>dgm_search.py</code>，我们在 HGM 框架上重写）</th></tr>
-  <tr><td>推进方式</td><td>20 个线程异步，每一步要么"扩展"、要么"评估一道题"</td><td>按代推进：每代 4 个父代各生一个子代，全部评完再进入下一代</td></tr>
-  <tr><td>何时扩展</td><td>评估次数 n 满足 n<sup>0.6</sup> ≥ 子代数时扩展，否则评估</td><td>每代固定生 4 个</td></tr>
-  <tr><td>选父代</td><td>看整棵子树（节点加所有后代）的成绩，做 Thompson 采样</td><td>权重 = sigmoid(10 × (准确率 − 0.5)) ÷ (1 + 已有子代数)</td></tr>
-  <tr><td>怎么评估</td><td>按节点自己的成绩做 Thompson 采样，选中的节点评一道随机题</td><td>先评 10 题，解出 ≥ 40% 再评 50 题</td></tr>
-  <tr><td>谁留在档案里</td><td>所有子代都在树里</td><td>生成了补丁、评完 10 题的子代都进档案</td></tr>
+  <tr><th></th><th>HGM [1]（<code>hgm.py</code>）</th><th>DGM [2]（<code>dgm_search.py</code>，在 HGM 框架上重新实现）</th></tr>
+  <tr><td>调度方式</td><td>20 个线程异步执行，每一步要么扩展（生成子代），要么评估一道题</td><td>按代同步：每代选 4 个父代各生成一个子代，全部评估完再进入下一代</td></tr>
+  <tr><td>扩展时机</td><td>已完成评估次数 n 满足 n<sup>0.6</sup> ≥ 子代数时扩展，否则评估</td><td>每代固定生成 4 个</td></tr>
+  <tr><td>父代选择</td><td>依据整棵子树（节点及其所有后代）的成绩做 Thompson 采样，即论文中的谱系元生产力（clade-metaproductivity）</td><td>权重 = sigmoid(10 × (准确率 − 0.5)) ÷ (1 + 已有子代数)</td></tr>
+  <tr><td>评估分配</td><td>依据节点自身成绩做 Thompson 采样，选中的节点评估一道随机题</td><td>分段评估：先评 10 题，解出率 ≥ 40% 再评 50 题</td></tr>
+  <tr><td>档案</td><td>所有子代都保留在树中</td><td>生成了补丁且完成 10 题评估的子代进入档案</td></tr>
 </table>
 
-<h2>5. 成本怎么计量</h2>
+<h2>5. 成本计量</h2>
 <table>
   <tr><th>组件</th><th>作用</th><th>文件</th></tr>
-  <tr><td>代理</td><td>容器里的每次模型调用都经过它，记下 token 数和"哪个环节、哪个节点、哪道题"。放在智能体外面，因为智能体会改自己的代码</td><td><code>instrumentation/llm_proxy.py</code></td></tr>
-  <tr><td>账本</td><td>所有事件写进同一个 JSONL：模型调用、各阶段耗时、选了谁、生了谁、停了谁。离线实验都从这里读数据</td><td><code>runs/ledger.jsonl</code></td></tr>
-  <tr><td>GPU 占用小时</td><td>一次运行的墙钟时间，扣掉 30 分钟以上没有事件的停机间隔</td><td><code>instrumentation/analyze_ledger.py</code></td></tr>
+  <tr><td>计量代理</td><td>容器内的所有模型调用都经过它，记录 token 数以及所属环节、节点和题目。放在智能体之外，因为智能体会改写自己的代码</td><td><code>instrumentation/llm_proxy.py</code></td></tr>
+  <tr><td>账本</td><td>所有事件写入同一个 JSONL 文件：模型调用、各阶段耗时、父代选择、子代生成、节点停止。离线实验都以它为数据源</td><td><code>runs/ledger.jsonl</code></td></tr>
+  <tr><td>GPU 占用小时</td><td>一次运行的墙钟时间，扣除超过 30 分钟没有任何事件的停机间隔</td><td><code>instrumentation/analyze_ledger.py</code></td></tr>
 </table>
 
-<h2>6. ERL：用预测决定"这个子代别再评了"</h2>
+<h2>6. ERL：预测驱动的节点停止</h2>
 <table>
   <tr><th>部分</th><th>说明</th><th>文件</th></tr>
-  <tr><td>停止规则</td><td>子代评满 3 题后，若它成绩的 80% 上界低于当前最优节点的 5% 下界，就不再评估它。被停的节点仍可当父代；最终选择只看真实成绩</td><td><code>erl/online_stop.py</code></td></tr>
-  <tr><td>预测先验</td><td>预测器给出子代最终解出率 p̂，作为 w 道题的先验加进后验：Beta(1 + 解出 + w·p̂, 1 + 未解出 + w·(1 − p̂))</td><td><code>erl/predict_stop.py</code></td></tr>
-  <tr><td>预测器特征</td><td>补丁形态（改了哪些部分、增删多少）、父代成绩、树的深度、前几道题的结果和耗时；每 50 个结果重训一次</td><td><code>instrumentation/prescreen/predict_from_diff.py</code></td></tr>
-  <tr><td>w 怎么定</td><td>自动：只用预测之后才拿到的结果检验预测有多准，再换算成 w。预测器还没证明自己时 w = 0</td><td><code>erl/online_stop.py</code></td></tr>
-  <tr><td>在线变体</td><td><code>hgm-erlx</code>：停止腾出的预算用来生新子代；<code>hgm-erlxa</code>：再抽 10% 的停止做审计</td><td><code>run_all.sh</code></td></tr>
+  <tr><td>停止规则</td><td>子代至少评估 3 题后，若其成绩的 80% 置信上界低于当前最优节点的 5% 置信下界，就停止评估它。被停的节点仍可作为父代；最终选择只依据真实成绩</td><td><code>erl/online_stop.py</code></td></tr>
+  <tr><td>预测先验</td><td>预测器给出子代最终解出率 p̂，作为相当于 w 道题的先验并入后验：Beta(1 + 解出 + w·p̂, 1 + 未解出 + w·(1 − p̂))</td><td><code>erl/predict_stop.py</code></td></tr>
+  <tr><td>特征</td><td>补丁形态（修改了哪些模块、增删行数）、父代成绩、树中深度、前几道题的结果与耗时；每新增 50 个结果重新训练一次</td><td><code>instrumentation/prescreen/predict_from_diff.py</code></td></tr>
+  <tr><td>先验权重 w</td><td>自动校准：只用预测之后才获得的结果检验预测误差，再换算为 w。预测器尚未在本次搜索中得到验证时 w = 0，退化为纯统计规则</td><td><code>erl/online_stop.py</code></td></tr>
+  <tr><td>在线变体</td><td><code>hgm-erlx</code>：停止节省的预算用于生成新子代；<code>hgm-erlxa</code>：另抽取 10% 的停止决定做审计</td><td><code>run_all.sh</code></td></tr>
 </table>
-<p>离线回放的结果（第一轮 6 次 HGM 运行，每次打乱 20 种结果顺序）：</p>
-<table>
-  <tr><th>设置</th><th>平均省下的评估时间</th><th>选择改变的比例</th><th>最大损失</th></tr>
-  <tr><td>纯统计（w = 0）</td><td>17.2%</td><td>7 / 120</td><td>2.3 个百分点</td></tr>
-  <tr><td>自动 w</td><td>27.4%</td><td>13 / 120</td><td>8.4 个百分点</td></tr>
-  <tr><td>自动 w + 单题超时</td><td>34.1%</td><td>12 / 120</td><td>8.4 个百分点</td></tr>
-</table>
-<p class="small">"损失"是新选出的节点比原选择在全部搜索结果上低多少。预测能多省约 10 个百分点，代价是偶尔的大损失。这些是早期数据上的结果，复现时以自己跑出的为准。</p>
+<p>早期离线回放显示，预测能比纯统计规则节省更多评估，但偶尔会过早停掉真正的最优节点。节省幅度与偶发误判的代价之间如何权衡，仍是开放问题（方向 6）。</p>
 
-<h2>7. 六个开放方向</h2>
+<h2>7. 开放方向</h2>
+<p>以下只是起点，欢迎提出自己的问题，或者组合多个方向。</p>
 <table>
-  <tr><th>方向</th><th>研究问题</th><th>从哪段代码开始</th><th>第一个实验</th></tr>
-  <tr><td>1. EarlyEval 式单题早停</td><td>一道题解到一半，能否根据智能体的行为判断它注定失败，提前结束？</td><td><code>instrumentation/early_stop/</code>、<code>erl/micro_stop.py</code></td><td>在对话记录上训练前缀分类器，加入测试输出等文本特征，看最终选择会不会变</td></tr>
-  <tr><td>2. 小模型当代理评估</td><td>用更便宜的小模型解题，成绩能否预测大模型下的表现和排名？</td><td>模型在 <code>config_local.yaml</code> 配置；计划中的 <code>erl/proxy.py</code></td><td>20 到 30 个节点分别用大小模型评一遍，算排名相关；再用 conformal 预测 [5] 给出下界</td></tr>
-  <tr><td>3. 下界随迭代的变化</td><td>当前最优的下界不断上升、子代分布不断漂移，预测器后期还准吗？</td><td>账本里的 <code>erl_fit</code>、<code>erl_retire</code> 事件；<code>erl/replay.py</code></td><td>按时间把运行分 4 段，画出下界轨迹、各段停止次数、预测误差随深度的变化</td></tr>
-  <tr><td>4. 动态早停阈值</td><td>阈值（80% 上界、至少 3 题）能否随剩余预算或停错率自动调整？</td><td><code>erl/policy.py</code>（策略接口）、<code>erl/online_stop.py</code></td><td>实现两种动态阈值，和固定阈值比较"节省 vs 损失"曲线</td></tr>
-  <tr><td>5. 相邻两轮的补丁</td><td>只看子代相对父代的补丁，能否在评估前预测它变好还是变坏？</td><td>各节点的 <code>model_patch.diff</code>；<code>instrumentation/prescreen/predict_from_diff.py</code></td><td>把预测目标改成"子代减父代"，加入更细的补丁特征，看能否识别改坏了的子代</td></tr>
-  <tr><td>6. 组合多种信号</td><td>上面的信号怎样组合？预测成本、评估节省、误判代价怎样取舍？</td><td>ERL 的 Beta 先验；<code>erl/predict_robust.py</code></td><td>把各种设置画在"总成本 vs 损失"图上，找帕累托前沿，同时报告平均和最大损失</td></tr>
+  <tr><th>方向</th><th>核心问题</th><th>切入点</th></tr>
+  <tr><td>1. EarlyEval [5] 式单题早停</td><td>一道题解到一半时，能否根据智能体的行为轨迹判断它注定失败，从而提前终止？</td><td><code>instrumentation/early_stop/</code></td></tr>
+  <tr><td>2. 小模型代理评估</td><td>低成本小模型的评估结果，能否预测候选智能体在大模型下的表现与排名？</td><td><code>config_local.yaml</code>（更换模型）</td></tr>
+  <tr><td>3. 下界随迭代的变化</td><td>随着搜索推进、子代分布漂移，预测器和停止规则是否仍然可靠？</td><td>账本、<code>erl/replay.py</code></td></tr>
+  <tr><td>4. 动态停止阈值</td><td>停止阈值能否根据剩余预算、当前最优的确定程度等搜索状态自适应调整？</td><td><code>erl/policy.py</code></td></tr>
+  <tr><td>5. 相邻版本的补丁</td><td>仅凭子代相对父代的补丁，能否在评估开始前预测它变好还是变坏？</td><td>各节点的 <code>model_patch.diff</code></td></tr>
+  <tr><td>6. 多信号组合</td><td>多种预测信号如何组合？预测成本、评估节省与误判代价如何权衡？</td><td><code>erl/online_stop.py</code></td></tr>
 </table>
 
-<h2>8. 所有方向共用的评价方式</h2>
+<p class="small">两个更远的延伸：其一，降低单次评估的成本。让模型自己管理上下文、决定保留什么，可以在长时间的智能体任务上用更少的计算量取得更高的准确率 [13]；我们的一道题最长要跑 1 小时，诊断提示词超长本质上也是上下文管理问题。其二，权重空间的自我改进。已有初步结果显示，大模型可以不经训练、直接读写神经网络权重，作者认为这为 RSI 提供了更直接的路径 [14]；但它超出了本项目"模型固定"的设定，且目前只是博客中的初步报告。</p>
+
+<h2>8. 研究约定</h2>
 <table>
-  <tr><th>要求</th><th>说明</th></tr>
-  <tr><td>先离线，再上线</td><td>用 <code>erl/replay.py</code> 在账本上回放，截在 9.646 GPU 小时；用 <code>erl/predict_robust.py</code> 的 20 种随机顺序检验稳健性</td></tr>
-  <tr><td>报告四个数</td><td>省下的评估时间；选择改变的比例；损失（平均和最大）；预测本身的成本</td></tr>
-  <tr><td>两个基线</td><td>纯统计停止（w = 0）和自动 w</td></tr>
-  <tr><td>不能偷看</td><td>预测器只能用决策时刻之前的数据；不能用"被自己停掉的节点"来证明自己准</td></tr>
-  <tr><td>改代码的规矩</td><td>新功能加默认关闭的开关，写进 <code>repos/HGM/MODIFICATIONS.md</code>；新的停止策略附单元测试（参考 <code>erl/test_online_stop.py</code>）</td></tr>
-  <tr><td>服务器礼仪</td><td>离线分析用 <code>nice -n 19 ionice -c3</code>，否则会拖慢正在跑的实验</td></tr>
+  <tr><th>约定</th><th>要求</th><th>原因</th></tr>
+  <tr><td>等成本比较</td><td>与不做预测的基线在相同 GPU 预算下比较最终选出的智能体；报告净节省，即节省的评估成本减去预测本身的成本</td><td>预测本身也消耗算力（如小模型推理、额外的模型调用）。节省 2 小时评估、预测花费 1.5 小时，净节省只有 0.5 小时</td></tr>
+  <tr><td>无前视偏差</td><td>在时刻 t 做出的决定，预测器只能使用 t 之前已经结束的评估来训练和校准</td><td>离线回放时整份账本都可见，误用之后的数据会让预测显得准确，在线运行时却无法获得这些数据</td></tr>
+  <tr><td>可消融</td><td>每项改动通过环境变量开关启用、默认关闭，并记录在 <code>repos/HGM/MODIFICATIONS.md</code></td><td>开关关闭时行为与原代码一致，任何人都能用同一份代码做开、关对照（消融实验）</td></tr>
+  <tr><td>不干扰实验</td><td>离线分析以最低优先级运行：<code>nice -n 19 ionice -c3 python ...</code></td><td>服务器是共享的；GPU 占用小时按墙钟时间计，CPU 和磁盘争用造成的减速会计入正在运行的实验</td></tr>
 </table>
+
+<h2>9. 科学智能体 RSI 探索：换一个科学基准或基线</h2>
+<p>前面的方法都在 Polyglot 上开发。一个自然的问题是：这些"省评估"的方法换到科学任务上还成立吗？科学任务的一次评估往往更贵（要处理数据、跑分析，甚至训练模型），省评估的收益也可能更大。这一节给出候选的基准、基线和接入路径，具体选哪个、怎么做，由大家自己决定。</p>
+
+<h3>9.1 候选基准</h3>
+<table>
+  <tr><th>基准</th><th>任务形式</th><th>评分方式</th><th>评估成本与接入难度</th></tr>
+  <tr><td>SciCode [10]</td><td>科研代码生成：80 个主问题，拆成 338 个子问题，由科学家根据论文结果或解析解编写</td><td>每个问题都有参考解和单元测试，自动评分</td><td>成本低，形式与 Polyglot 最接近（写代码、跑测试），最容易接入，适合作为第一站</td></tr>
+  <tr><td>ScienceAgentBench [11]</td><td>数据驱动的科研任务：从 44 篇论文中提取的 102 个任务，覆盖生物信息、计算化学、地理信息、心理与认知神经科学</td><td>智能体输出一个独立的 Python 程序，按程序本身、执行结果和成本评价</td><td>成本中等，需要准备各任务的数据和运行环境</td></tr>
+  <tr><td>MLE-bench [12]</td><td>机器学习工程：75 个离线 Kaggle 比赛，另有 lite 子集</td><td>对照 Kaggle 排行榜，看是否达到奖牌线</td><td>成本高：一次评估要训练模型，还会和 vLLM 争用 GPU。正因为评估贵，省评估方法的收益可能最大</td></tr>
+</table>
+
+<h3>9.2 候选基线</h3>
+<p>科学智能体领域也有递归自我改进的系统，可以作为对照组：</p>
+<table>
+  <tr><th>系统</th><th>搜索与选择方式</th><th>可以怎么用</th></tr>
+  <tr><td>AIDE² [6]</td><td>两层循环：内层按公开指标改实验方案，外层按对内层不可见的隐藏评分选择智能体版本</td><td>结构与 HGM 最接近，适合作为主要对照</td></tr>
+  <tr><td>ScienceBuddy [7]</td><td>只接受在相同任务和种子下配对评估得分提高、且满足编辑约束的修改；之后再训练模型</td><td>只取它"改流程"的部分作对照（本项目模型固定）</td></tr>
+  <tr><td>RHI [8]</td><td>新产物与缓存的上一版产物两两比较，新版胜率低于阈值时停止整个改进</td><td>它的停止条件可以作为"整个搜索何时结束"的基线</td></tr>
+  <tr><td>AI Scientist-v2 [9]</td><td>分阶段的实验树搜索，节点分为调试、改进、复验等类型</td><td>它搜索的是实验方案而非智能体本身，适合在任务层面对照</td></tr>
+</table>
+<p class="small">这些系统的代码是否开源、能否换成我们的本地模型，需要先确认。如果直接跑原系统不现实，可以像 <code>dgm_search.py</code> 那样，只把它们的搜索与选择规则在我们的框架上重新实现，这样比较的就只是策略。</p>
+
+<h3>9.3 接入路径</h3>
+<table>
+  <tr><th>步骤</th><th>做什么</th><th>参照</th></tr>
+  <tr><td>① 评测程序</td><td>为新基准写数据准备和评分：每个任务一个容器，运行智能体，再按基准的规则评分，并在各阶段打上计量时间点</td><td><code>repos/HGM/polyglot/</code>（<code>prepare_polyglot_dataset.py</code>、<code>harness.py</code>）</td></tr>
+  <tr><td>② 检查泄露</td><td>确认智能体在容器里看不到参考解和测试，例如 SciCode 的参考解</td><td><code>HGM_HIDE_ANSWERS</code> 的做法（<code>polyglot/test_spec.py</code>）</td></tr>
+  <tr><td>③ 划分任务</td><td>分出搜索集和留出集，留出集只用于最终评估</td><td><code>polyglot/subsets/</code></td></tr>
+  <tr><td>④ 测初始智能体</td><td>测单次评估的成本，以及重复评估的噪声，据此定预算</td><td><code>repeat_eval.py</code>、<code>instrumentation/repeat_stats.py</code></td></tr>
+  <tr><td>⑤ 等成本对照</td><td>在相同 GPU 预算下跑 HGM、DGM、ERL，以及选定的科学基线</td><td><code>run_all.sh</code>（新增配置）</td></tr>
+</table>
+<p class="small">计量代理和账本与基准无关，接入新基准后照常工作。这些科学 RSI 工作在评估设计上也有可借鉴之处，例如修改前先做有效性检查、按评分细则给部分分 [7]、优先在父代已评过的任务上做配对比较 [7, 8]、把指导修改的信号与选择版本的信号分开 [6]，都可以在新基准上一并尝试。</p>
 
 <h2>参考文献</h2>
 <ol class="refs">
@@ -133,9 +161,17 @@
   <li>J. Zhang, S. Hu, C. Lu, R. Lange, J. Clune. <em>Darwin Gödel Machine: Open-Ended Evolution of Self-Improving Agents.</em> arXiv:2505.22954, 2025.</li>
   <li>Aider. <em>Polyglot benchmark.</em> github.com/Aider-AI/polyglot-benchmark（固定在提交 7e0611e）。</li>
   <li>Qwen Team. <em>Qwen3-Coder-30B-A3B-Instruct-FP8</em>（模型卡）. huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8.</li>
-  <li>A. N. Angelopoulos, S. Bates. <em>A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification.</em> arXiv:2107.07511, 2021.</li>
+  <li>Y. Shi, Z. Sun, J. Dong, C. Wan, D. Lo, X. Gu. <em>EarlyEval: Cheaper Agent Evaluation via Early Outcome Prediction.</em> arXiv:2609.02783, 2026.</li>
+  <li>D. Srikanth, B. Zhao, D. Xu, Y. Wu, Z. Jiang. <em>Recursive Self-Improvement of AI Research Agents.</em> arXiv:2609.26457, 2026.</li>
+  <li>S. Xue, J. Zhong, Z. Nan, W. Li, Z. Yu, J. Ding, Q. Gao, P. Zhan, Y. Zhang, T. Cheng, Z. Yin, Y. Wu, L. Yang. <em>ScienceBuddy: Recursive-in-Recursive Self-Improvement for Interactive Scientific Agents.</em> arXiv:2609.17523, 2026.</li>
+  <li>H. Lee, J. Xu, J. Seely, D. Lee, M. Zaharia, Y. Tang. <em>Recursive Harness Self-Improvement.</em> arXiv:2607.15524, 2026.</li>
+  <li>Y. Yamada, R. T. Lange, C. Lu, S. Hu, C. Lu, J. Foerster, J. Clune, D. Ha. <em>The AI Scientist-v2: Workshop-Level Automated Scientific Discovery via Agentic Tree Search.</em> arXiv:2504.08066, 2025.</li>
+  <li>M. Tian et al. <em>SciCode: A Research Coding Benchmark Curated by Scientists.</em> arXiv:2407.13168, 2024.</li>
+  <li>Z. Chen et al. <em>ScienceAgentBench: Toward Rigorous Assessment of Language Agents for Data-Driven Scientific Discovery.</em> arXiv:2410.05080, 2024.</li>
+  <li>J. S. Chan et al. <em>MLE-bench: Evaluating Machine Learning Agents on Machine Learning Engineering.</em> arXiv:2410.07095, 2024.</li>
+  <li>R. Shao, S. Z. Shen, J. O. Yin, Y. Li, M. Wang, H. Ivison, R. Poovendran, N. Lambert, T. Xiao, M. Lewis, W. Yih, L. Zettlemoyer, P. W. Koh. <em>Context Language Models.</em> arXiv:2609.37725, 2026.</li>
+  <li>R. Takehi, J. Teoh, A. Zhang, O. Khattab. <em>Sparks of Weight-Space Programming: LLMs Can Natively Read &amp; Write Neural Network Weights.</em> 博客文章，rikiyat.github.io/blog/weight-space-programming/，2026 年 11 月 2 日。</li>
 </ol>
-<p class="small">EarlyEval 的出处见项目调研文档。</p>
 
 </main>
 </body>

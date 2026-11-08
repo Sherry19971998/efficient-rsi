@@ -1,27 +1,50 @@
-# Run outputs: the ledger (hundreds of MB), logs and per-run files. Only the predictor history is kept.
+# Everything a run produces stays out of git: anyone who clones this repository runs the
+# experiments and gets their own outputs.
+
+# Run outputs: the ledger (hundreds of MB), logs, per-run files and the predictor history
+# (erl_history.json, built from finished runs). None of them is kept in git.
 runs/*
-!runs/erl_history.json
 !runs/.gitkeep
+# Outputs of offline analyses run from other directories (replay rows, node tables, logs)
+*.jsonl
+*.csv
+*.log
 
 # Machine-specific settings (copy env.sh.example)
 env.sh
+.env
 tmp/
 cache/
 venv/
 .venv/
 
-# HGM search outputs, the initial agent's cached evaluation (~590 MB), datasets and build logs
-repos/HGM/output_hgm/
-# DGM's own repository, restored from repos/dgm-changes/ when needed
-repos/dgm/
+# HGM search outputs (upstream config.yaml writes "output_hgm:"), the initial agent's cached
+# evaluation (~590 MB, and its .bak copies), datasets and image build logs
+repos/HGM/output_hgm*/
 repos/HGM/initial_polyglot/
 repos/HGM/initial_swe/
 repos/HGM/logs/
+repos/HGM/results/
+repos/HGM/polyglot/predictions/
+repos/HGM/swe_bench/predictions/
 repos/HGM/swe_bench/SWE-bench/
 repos/HGM/polyglot/polyglot-benchmark/
 repos/HGM/polyglot/polyglot_benchmark_metadata.json
+# What the coding agent writes to its working directory when run by hand
+repos/HGM/chat_history.md
+repos/HGM/model_patch.diff
+# DGM's own repository, restored from repos/dgm-changes/ when needed
+repos/dgm/
 
+# Python, editors, OS
 __pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
 .DS_Store
+.claude/settings.local.json

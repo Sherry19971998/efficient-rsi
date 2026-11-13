@@ -31,6 +31,7 @@ from utils.docker_utils import (build_hgm_container, cleanup_container,
 from utils.eval_utils import get_acc_on_tasks
 from utils.evo_utils import (get_all_performance, get_model_patch_paths,
                              is_compiled_self_improve)
+from utils.git_utils import remove_patch_by_files
 import rsi_ledger
 
 dataset = None
@@ -458,6 +459,14 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             patch_content = f.read()
             if not patch_content.strip():
                 raise Exception("Model patch file is empty")
+        if polyglot:
+            # efficient-RSI fix: filter the patch once, here, while no other thread knows this node.
+            # Upstream did it on every evaluation by rewriting the shared file in place, which raced
+            # (see harness() in polyglot/harness.py); evaluations now only read it.
+            filtered = remove_patch_by_files(patch_content)
+            if filtered != patch_content:
+                with open(model_patch_file, "w") as f:
+                    f.write(filtered)
 
     except Exception as e:
         if max_try > 1:

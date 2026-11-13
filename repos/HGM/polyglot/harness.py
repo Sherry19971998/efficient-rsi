@@ -344,7 +344,7 @@ def process_entry(
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
 
 
-def harness(
+def _harness(
     dataset_path="polyglot/polyglot_benchmark_metadata.json",
     test_task_list=None,
     max_workers=4,
@@ -363,19 +363,9 @@ def harness(
         num_samples: Number of samples to process (-1 for all)
         max_workers: Maximum number of concurrent threads
         model_name_or_path: Model name or path
-        model_patch_paths: Paths to the model patches for hgm
+        model_patch_paths: Paths to the model patches for hgm (already filtered by harness())
         num_evals: Repeated number of swe evaluations
     """
-    if model_patch_paths:
-        for model_patch_path in model_patch_paths:
-            # Read and modify model patch
-            with open(model_patch_path, "r") as f:
-                patch_content = f.read()
-            patch_content = remove_patch_by_files(patch_content)
-            # Placeholder for any patch modifications if needed
-            with open(model_patch_path, "w") as f:
-                f.write(patch_content)
-
     # Load dataset
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
@@ -498,6 +488,44 @@ def harness(
     print(f"Report written to {report_file}")
 
     return out_dnames
+
+
+def harness(
+    dataset_path="polyglot/polyglot_benchmark_metadata.json",
+    test_task_list=None,
+    max_workers=4,
+    model_name_or_path=None,
+    model_patch_paths=None,
+    pred_dname="./polyglot/predictions",
+    output_dir="./polyglot/predictions",
+    skip_existing=True,
+    init_agent_path=".",
+):
+    """Evaluate an agent on test_task_list; see _harness for the arguments.
+
+    efficient-RSI fix: each patch in model_patch_paths is filtered (remove_patch_by_files) into a
+    private copy that only this call uses, and the files on disk are only read. Upstream wrote the
+    filtered text back over the shared file with open(path, "w"), which first truncates it. HGM
+    evaluates the same agent in several threads at once (each call is one task), so a thread could
+    read the file between another thread's truncate and write, and write it back empty: the agent
+    then silently ran as its parent from that point on. In v1 this emptied 8 first-generation
+    patches, among them the final agent of hgm-fixed-r1.
+    """
+    kwargs = dict(dataset_path=dataset_path, test_task_list=test_task_list, max_workers=max_workers,
+                  model_name_or_path=model_name_or_path, pred_dname=pred_dname, output_dir=output_dir,
+                  skip_existing=skip_existing, init_agent_path=init_agent_path)
+    if not model_patch_paths:
+        return _harness(model_patch_paths=model_patch_paths, **kwargs)
+    with tempfile.TemporaryDirectory(prefix="hgm_patches_") as tmp:
+        private_paths = []
+        for i, model_patch_path in enumerate(model_patch_paths):
+            with open(model_patch_path, "r") as f:
+                patch_content = remove_patch_by_files(f.read())
+            private_path = os.path.join(tmp, f"{i:03d}_model_patch.diff")
+            with open(private_path, "w") as f:
+                f.write(patch_content)
+            private_paths.append(private_path)
+        return _harness(model_patch_paths=private_paths, **kwargs)
 
 
 def main():

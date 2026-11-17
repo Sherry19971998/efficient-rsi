@@ -21,6 +21,7 @@ from utils.docker_utils import copy_src_files
 
 import hgm_utils
 import rsi_ledger
+import lc_integration
 from config import load_config
 from tree import Node
 from utils.common_utils import load_json_file
@@ -521,6 +522,16 @@ def main():
             )
             if len(available_tasks) == 0:
                 return
+            # harness-rsi (lc_integration.py): with HGM_COUPLED_TASKS=1, evaluate a child first on
+            # tasks its parent has a record of, so the coupled evaluation can fork from it. The
+            # order inside each group is HGM's own (fixed or random, eval_random_level).
+            if (lc_integration.enabled() and os.getenv("HGM_COUPLED_TASKS", "0") == "1"
+                    and selected_node.parent_id is not None):
+                parent_dir = os.path.join(output_dir, hgm_utils.nodes[selected_node.parent_id].commit_id)
+                recorded = lc_integration.recorded_tasks(parent_dir)
+                preferred = [t for t in available_tasks if lc_integration._safe(t) in recorded]
+                if preferred:
+                    available_tasks = preferred
             if random.random() < opt_cfg.eval_random_level:
                 selected_node_tasks = random.choice(available_tasks)
             else:

@@ -1,0 +1,8 @@
+{
+  "_doc": "Harness knobs. ctx_policy.py reads tool_result_max_chars, keep_tool_rounds, compress_test_output; hgm_agent.py reads max_turns (solving) and max_turns_self_improve (proposing). null or false means off.",
+  "tool_result_max_chars": null,
+  "keep_tool_rounds": null,
+  "compress_test_output": false,
+  "max_turns": 40,
+  "max_turns_self_improve": 60
+}

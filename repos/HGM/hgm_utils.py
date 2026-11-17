@@ -33,6 +33,7 @@ from utils.evo_utils import (get_all_performance, get_model_patch_paths,
                              is_compiled_self_improve)
 from utils.git_utils import remove_patch_by_files
 import rsi_ledger
+import lc_integration
 
 dataset = None
 alpha = 0.5
@@ -280,6 +281,8 @@ def eval_agent(
 
 
 def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
+    if lc_integration.enabled() and polyglot:      # harness-rsi: little-coder improves itself
+        return sample_child_lc(parent_commit, image_name, force_rebuild=force_rebuild)
     metadata = {}
     root_dir = os.path.abspath("./")  # root_dir should be /hgm
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -481,6 +484,124 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
         phases.done()
         try:
             cleanup_container(container)
+        except Exception as e:
+            safe_log(f"Error during container cleanup: {e}")
+        save_metadata(metadata, run_output_dir)
+    return run_id
+
+def sample_child_lc(parent_commit, image_name, force_rebuild=False):
+    """harness-rsi (lc_integration.py): little-coder proposes a change to its own harness.
+
+    Same container and bookkeeping as sample_child; differences:
+      - the code under improvement is /hgm/lc (git_dir), patched with the ancestor chain there;
+      - the proposer gets a short instruction that points at /hgm/workspace (digest, failed
+        trajectories, test logs, patch ledger, ancestor patches) instead of a diagnosis prompt with
+        the logs pasted in (efficient-rsi v1 lost 39-99% of proposals to over-long prompts);
+        HGM_LC_DIAGNOSE=1 also runs efficient-rsi's diagnosis and appends it;
+      - the resulting patch keeps only whitelisted files and is rejected if it removes a recorder
+        or context-policy hook (lc_integration.filter_patch)."""
+    metadata = {"run_id": None, "parent_commit": parent_commit, "agent": "littlecoder"}
+    root_dir = os.path.abspath("./")
+    run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_output_dir = os.path.join(root_dir, f"{output_dir}/{run_id}/")
+    os.makedirs(run_output_dir, exist_ok=True)
+    metadata["run_id"] = run_id
+    phases = rsi_ledger.Phases("propose", node=run_id, parent=parent_commit)
+    phases.phase("setup")
+    container = None
+    lc = lc_integration.CONTAINER_LC
+    try:
+        if parent_commit == "failed":
+            return "failed"
+        with open("polyglot/polyglot_benchmark_metadata.json") as f:
+            self_improve_step.dataset = json.loads(f.read())
+        setup_logger(os.path.join(run_output_dir, "self_improve.log"))
+        client = docker.from_env()
+        container_name = f"hgm-container-{run_id}"
+        remove_existing_container(client, container_name)
+        container = build_hgm_container(client, root_dir, image_name, container_name, force_rebuild=force_rebuild)
+        container.start()
+        phases.attach(container)
+
+        patch_files = get_model_patch_paths(root_dir, output_dir, parent_commit)
+        for patch_file in patch_files:
+            copy_to_container(container, patch_file, "/hgm/parent_patch.txt")
+            log_container_output(container.exec_run("/bin/sh -c 'patch -p1 < /hgm/parent_patch.txt'", workdir=lc))
+            container.exec_run("rm /hgm/parent_patch.txt", workdir="/hgm")
+        container.exec_run("git init", workdir=lc)
+        container.exec_run("git add --all", workdir=lc)
+        container.exec_run("git -c user.name='user' -c user.email='you@example.com' commit -q -m base", workdir=lc)
+        commit_hash = container.exec_run("git rev-parse HEAD", workdir=lc).output.decode().strip()
+        log_container_output(container.exec_run(f"python -m pip install -r {lc}/requirements.txt", workdir="/"))
+
+        entry = choose_entry(parent_commit)
+        metadata["entry"] = entry
+        phases.phase("diagnose")
+        ws = os.path.join(run_output_dir, "workspace")
+        lc_integration.build_workspace(output_dir, parent_commit, entry, ws)
+        copy_to_container(container, ws + "/", "/hgm/workspace/")
+        diagnosis = None
+        if os.getenv("HGM_LC_DIAGNOSE", "0") == "1":
+            with rsi_ledger.bind(node=run_id):
+                diagnosis = diagnose_problem(entry, parent_commit, root_dir, output_dir,
+                                             patch_files=patch_files, polyglot=True)
+        problem_statement = lc_integration.proposer_instruction(entry, diagnosis)
+        metadata["problem_statement"] = problem_statement
+
+        env_vars = {"OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"), "HGM_TASK_ID": "self_improve",
+                    "LC_DISABLE_TOOLS": "WebSearch,WebFetch", "LC_FIXED_DATE": os.getenv("LC_FIXED_DATE", ""),
+                    "LC_RSI_MODE": "record", "LC_RECORD_TO": "/hgm/propose_record/rec"}
+        env_vars.update(rsi_ledger.proxy_env("propose", run_id))
+        cmd = ["timeout", str(timeout), "python", f"{lc}/hgm_agent.py", "--problem_statement", problem_statement,
+               "--git_dir", lc + "/", "--chat_history_file", "/hgm/self_evo.md", "--base_commit", commit_hash,
+               "--outdir", "/hgm/", "--test_description", get_test_description(swerepo=False),
+               "--self_improve", "--model", llm, "--timeout", str(timeout)]
+        phases.phase("agent_run")
+        log_container_output(container.exec_run(cmd, environment=env_vars, workdir=lc), raise_error=False)
+
+        copy_from_container(container, "/hgm/self_evo.md", os.path.join(output_dir, run_id, "self_evo.md"))
+        for src, name in (("/hgm/rsi_attempt.json", "propose_rsi.json"),
+                          ("/hgm/propose_record/rec.jsonl", "propose_record.jsonl")):
+            try:
+                copy_from_container(container, src, os.path.join(output_dir, run_id, name))
+            except Exception:
+                pass
+        # Lineage notes: the proposer's version of notes.md becomes this child's notes (capped).
+        parent_notes = lc_integration.read_notes(os.path.join(output_dir, parent_commit))
+        r = container.exec_run("cat /hgm/workspace/notes.md")
+        notes = r.output.decode() if r.exit_code == 0 and r.output.strip() else parent_notes
+        notes, notes_cut = lc_integration.cap_notes(notes)
+        with open(os.path.join(output_dir, run_id, "notes.md"), "w") as f:
+            f.write(notes)
+        raw_patch = container.exec_run("cat /hgm/model_patch.diff").output.decode()
+        with open(os.path.join(output_dir, run_id, "model_patch.raw.diff"), "w") as f:
+            f.write(raw_patch)
+        kept, dropped, violation = lc_integration.filter_patch(raw_patch)
+        metadata["patch_dropped_files"] = dropped
+        metadata["patch_violation"] = violation
+        metadata["overall_performance"] = {
+            "accuracy_score": 0.0, "total_resolved_instances": 0, "total_submitted_instances": 0, "files": [],
+            "total_submitted_ids": [], "total_unresolved_ids": [], "total_emptypatch_ids": [], "total_resolved_ids": []}
+        rsi_ledger.event("lc_propose", node=run_id, parent=parent_commit, entry=entry, dropped=dropped,
+                         notes_chars=len(notes), notes_changed=notes != parent_notes, notes_cut=notes_cut,
+                         violation=violation, kept_files=lc_integration._changed_files(kept),
+                         raw_files=lc_integration._changed_files(raw_patch))
+        if violation:
+            raise Exception(f"patch rejected: {violation}")
+        if not kept.strip():
+            raise Exception("patch empty after the whitelist filter" + (f" (dropped {dropped})" if dropped else ""))
+        with open(os.path.join(output_dir, run_id, "model_patch.diff"), "w") as f:
+            f.write(kept)
+    except Exception as e:
+        safe_log(f"Error while sampling a child (littlecoder): {e}")
+        safe_log(traceback.format_exc())
+        metadata["error"] = str(e)
+        run_id = "failed"
+    finally:
+        phases.done()
+        try:
+            if container is not None:
+                cleanup_container(container)
         except Exception as e:
             safe_log(f"Error during container cleanup: {e}")
         save_metadata(metadata, run_output_dir)

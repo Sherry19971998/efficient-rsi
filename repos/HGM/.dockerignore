@@ -39,3 +39,10 @@ run.sh
 rsi_ledger.py
 dgm_search.py
 final_eval.py
+
+<!-- harness-rsi: host-side integration, never inside an agent container -->
+lc_integration.py
+config_local_lc.yaml
+scripts/
+HARNESS_RSI.md
+lc/.little-coder/

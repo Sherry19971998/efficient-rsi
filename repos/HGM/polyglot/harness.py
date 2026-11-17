@@ -24,6 +24,7 @@ from swe_bench.utils import (copy_from_container, copy_to_container,
                              safe_log, setup_logger)
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
 import rsi_ledger
+import lc_integration
 
 llm = ""
 timeout = 1800  # seconds
@@ -45,6 +46,9 @@ def process_entry(
     Process a single dataset entry. This function encapsulates the main processing logic
     for each entry to make it suitable for parallel execution.
     """
+    if lc_integration.enabled():     # harness-rsi: little-coder agent, coupled evaluation
+        return process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
+                                skip_existing=skip_existing, init_agent_path=init_agent_path)
     instance_id = entry["instance_id"]
     problem_statement = entry["problem_statement"]
     base_commit = entry["base_commit"]
@@ -342,6 +346,167 @@ def process_entry(
                 cleanup_container(client, container, logger)
         except Exception as e:
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
+
+
+def _score_in_container(container, entry, eval_file):
+    """efficient-rsi's grading, unchanged: stop the agent's processes, bring in the test commit,
+    keep only the solution files, run the language's test command (polyglot/harness.py)."""
+    if hide_answers():
+        container.exec_run("sh -c 'kill -9 -1 || true'", workdir="/")
+        copy_to_container(container, Path(entry["repo"]) / ".git", "/tmp/answer_repo/.git")
+        container.exec_run("git config --global --add safe.directory '*'", workdir="/")
+        log_container_output(container.exec_run("git -C /testbed fetch --quiet /tmp/answer_repo HEAD", workdir="/"))
+    log_container_output(container.exec_run(
+        "git -C /testbed stash push " + " ".join(entry["files"]["solution"]), workdir="/"))
+    log_container_output(container.exec_run(f"git -C /testbed reset --hard {entry['test_commit']}", workdir="/"))
+    log_container_output(container.exec_run("git -C /testbed clean -fd", workdir="/"))
+    log_container_output(container.exec_run("git -C /testbed stash pop", workdir="/"))
+    eval_file.write_text(get_eval_script(TEST_COMMANDS[entry["language"]]))
+    copy_to_container(container, eval_file, "/testbed/eval.sh")
+    container.exec_run("chmod +x /testbed/eval.sh", workdir="/")
+    return container.exec_run("timeout 120 ./eval.sh", workdir="/testbed")
+
+
+def process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
+                     skip_existing=True, init_agent_path="."):
+    """harness-rsi (lc_integration.py): one evaluation of the little-coder agent on one task.
+
+    Differences from process_entry:
+      - the agent is <init_agent_path>/lc, patched in /hgm/lc, run as /hgm/lc/hgm_agent.py;
+      - HGM_TEST_PROTOCOL=visible_ro: the task's tests are copied into /testbed before the agent
+        runs, read-only, and hashed before and after; a changed hash scores the attempt unresolved;
+      - the agent records every model call; with HGM_COUPLED=1 and a parent record of this task it
+        replays the parent's trajectory and calls the model only from the divergence point on;
+      - web tools are off (LC_DISABLE_TOOLS); the records go to <node>/records/, the attempt
+        summary to <task>_rsi.json, and an lc_eval event (route, live model seconds) to the ledger.
+    Grading is efficient-rsi's (_score_in_container)."""
+    instance_id = entry["instance_id"]
+    chat_history_file = out_dname / (instance_id + ".md")
+    out_fname = out_dname / (instance_id + ".json")
+    eval_file = out_dname / f"{instance_id}_eval.sh"
+    eval_result_file = out_dname / f"{instance_id}_eval.md"
+    attempt_file = out_dname / f"{instance_id}_rsi.json"
+    if out_fname.exists() and skip_existing:
+        return json.loads(out_fname.read_text())
+
+    node = model_name_or_path[:-2] if model_name_or_path.endswith("_0") else model_name_or_path
+    node_dir = lc_integration.node_dir_from_outdir(out_dname)
+    pdir = lc_integration.parent_dir(node_dir)
+    replay = lc_integration.coupled() and pdir is not None and lc_integration.has_record(pdir, instance_id)
+    rec_host = lc_integration.record_prefix(node_dir, instance_id)
+    rec_host.parent.mkdir(parents=True, exist_ok=True)
+
+    container, client, logger = None, None, None
+    eval_result, model_patch, attempt, tests_modified = "incomplete", "", {}, False
+    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
+    phases.phase("setup")
+    try:
+        client = docker.from_env()
+        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        logger = setup_logger(str(out_dname / f"{instance_id}_docker.log"))
+        test_spec = make_test_spec(entry)
+        container_name = test_spec.get_instance_container_name(run_id)
+        remove_existing_container(client, container_name)
+        container = build_container(test_spec, client, run_id, logger, True, force_rebuild=False)
+        container.start()
+        phases.attach(container)
+
+        copy_to_container(container, os.path.join(init_agent_path, lc_integration.LC_DIR) + "/",
+                          lc_integration.CONTAINER_LC + "/")
+        for model_patch_path in model_patch_paths or []:
+            copy_to_container(container, model_patch_path, "/hgm/parent_patch.txt")
+            log_container_output(container.exec_run(
+                "/bin/sh -c 'patch -p1 < /hgm/parent_patch.txt'", workdir=lc_integration.CONTAINER_LC))
+            container.exec_run("rm /hgm/parent_patch.txt", workdir="/hgm")
+        log_container_output(container.exec_run(
+            f"python -m pip install -r {lc_integration.CONTAINER_LC}/requirements.txt", workdir="/"))
+
+        protected, hashes_before = [], {}
+        if lc_integration.protocol() == "visible_ro":
+            for rel, data in lc_integration.test_file_contents(entry).items():
+                container.exec_run(["mkdir", "-p", str(Path(f"/testbed/{rel}").parent)], workdir="/")
+                with tempfile.NamedTemporaryFile(delete=False) as tf:
+                    tf.write(data)
+                copy_to_container(container, Path(tf.name), f"/testbed/{rel}")
+                os.unlink(tf.name)
+                container.exec_run(["chmod", "444", f"/testbed/{rel}"], workdir="/")
+                protected.append(rel)
+            hashes_before = lc_integration.sha256_map(container, protected)
+
+        if replay:
+            container.exec_run(["mkdir", "-p", "/hgm/parent_record"], workdir="/")
+            for suffix in (".jsonl", ".req.jsonl.gz"):
+                copy_to_container(container, Path(str(lc_integration.record_prefix(pdir, instance_id)) + suffix),
+                                  "/hgm/parent_record/rec" + suffix)
+
+        eval_cmd = MAP_REPO_VERSION_TO_SPECS[entry["language"]]["test_cmd"]
+        env_vars = {
+            "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
+            "HGM_TASK_ID": instance_id,
+            "HGM_PROTECTED_FILES": ",".join(protected),
+            "LC_DISABLE_TOOLS": "WebSearch,WebFetch",
+            "LC_FIXED_DATE": os.getenv("LC_FIXED_DATE", ""),
+            "LC_RSI_MODE": "replay" if replay else "record",
+            "LC_RECORD_TO": "/hgm/record/rec",
+            "LC_REPLAY_FROM": "/hgm/parent_record/rec" if replay else "",
+            "LC_ON_DIVERGE": "live",
+        }
+        env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
+        cmd = ["timeout", str(timeout), "python", f"{lc_integration.CONTAINER_LC}/hgm_agent.py",
+               "--problem_statement", entry["problem_statement"], "--git_dir", "/testbed/",
+               "--chat_history_file", f"/hgm/{chat_history_file.name}", "--base_commit", entry["base_commit"],
+               "--outdir", "/hgm/", "--test_description", get_test_description(eval_cmd, polyglot=True),
+               "--language", entry["language"], "--model", llm, "--timeout", str(timeout)]
+        phases.phase("agent_run")
+        log_container_output(container.exec_run(cmd, environment=env_vars, workdir="/testbed/"))
+
+        copy_from_container(container, f"/hgm/{chat_history_file.name}", chat_history_file)
+        copy_from_container(container, "/hgm/rsi_attempt.json", attempt_file)
+        for suffix in (".jsonl", ".req.jsonl.gz", ".replay", ".replay.req.jsonl.gz", ".side.jsonl"):
+            try:
+                copy_from_container(container, "/hgm/record/rec" + suffix, Path(str(rec_host) + suffix))
+            except Exception:
+                pass                      # optional files (no side calls, no replay log)
+        try:
+            attempt = json.loads(attempt_file.read_text())
+        except Exception:
+            attempt = {}
+        model_patch = container.exec_run("cat /hgm/model_patch.diff").output.decode()
+        if protected:
+            tests_modified = lc_integration.sha256_map(container, protected) != hashes_before
+            # the visible copies are untracked; grading checks out the real tests from test_commit
+            container.exec_run(["rm", "-f"] + [f"/testbed/{rel}" for rel in protected], workdir="/")
+
+        phases.phase("test")
+        if not model_patch:
+            eval_result = "empty_patch"
+        else:
+            r = _score_in_container(container, entry, eval_file)
+            eval_result_file.write_text(r.output.decode())
+            eval_result = "resolved" if r.exit_code == 0 and not tests_modified else "unresolved"
+        success = True
+    except Exception as e:
+        if logger is not None:
+            logger.error(f"Error processing entry {instance_id}: {e}")
+        eval_result = "incomplete" if not model_patch else "error"
+        success = False
+    finally:
+        phases.done()
+        try:
+            if container is not None:
+                cleanup_container(client, container, logger)
+        except Exception as e:
+            print(f"Error cleaning up Docker container for {instance_id}: {e}")
+
+    route = lc_integration.attempt_route(attempt, replay)
+    cost = lc_integration.record_cost(rec_host)
+    lc_integration.ledger_event(rsi_ledger, node, instance_id, route, attempt, cost, tests_modified, eval_result)
+    result = {"instance_id": instance_id, "model_name_or_path": model_name_or_path,
+              "model_patch": model_patch, "proposed_model_patches": [], "eval_result": eval_result,
+              "success": success, "tests_modified": tests_modified, "lc_route": route,
+              "lc_parent": pdir.name if pdir is not None else None, "lc_cost": cost}
+    out_fname.write_text(json.dumps(result, indent=4))
+    return {"success": success, "instance_id": instance_id, "eval_result": eval_result}
 
 
 def _harness(

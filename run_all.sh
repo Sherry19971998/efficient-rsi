@@ -18,6 +18,10 @@
 #   ./run_all.sh report    # per-run cost breakdown + cross-run comparison + anytime curve + noise/TTS
 #   ./run_all.sh archive-ledger <label>   # set an aborted run's ledger events aside before rerunning it
 #   ./run_all.sh v2        # the corrected rerun (RERUN_V2.md): searches, then final evaluations
+#   ./run_all.sh smoke-lc  # harness-rsi: scripts/lc_smoke.py checks + coupled 4 (vLLM and proxy must be up)
+#   ./run_all.sh init-lc   # harness-rsi: evaluate the little-coder root (repos/HGM/lc) once, with records
+#   ./run_all.sh pilot-lc  # harness-rsi: hgm-lc and hgm-lc-coupled, 50 task evaluations each
+#   ./run_all.sh search-lc # harness-rsi: LC_CONFIGS x REPEATS at BUDGET (see HARNESS_RSI.md)
 #
 # Knobs (environment variables):
 #   REPEATS="0 1 2"   repeat labels (hgm.py has no --seed; these are independent repeats)
@@ -46,6 +50,14 @@
 #   NOISE_PASSES=3 TTS_PASSES=3   passes for the noise and test-time-scaling experiments
 #   VLLM_BIN=vllm     vLLM executable
 #   BRIDGE=172.17.0.1 docker0 bridge address the proxy binds to (differs on some Docker setups)
+#   LC_CONFIGS="hgm-lc hgm-lc-coupled"   harness-rsi arms (repos/HGM/lc_integration.py):
+#                     hgm-lc          little-coder is the agent; every evaluation runs from scratch
+#                     hgm-lc-coupled  + coupled evaluation (replay the parent's trajectory, model calls
+#                                     only from the divergence point) + parent-recorded tasks first
+#                     hgm-lc-coupled-erlx  + efficient-rsi's node stopping (hgm-erlx)
+#   HGM_TEST_PROTOCOL=visible_ro   harness-rsi arms: tests visible and read-only, hashed (default)
+#   LC_FIXED_DATE="2026-11-16 Monday"   date in the agent's system prompt; the same for every run so
+#                     records replay across runs and across the shared initial evaluation
 
 set -euo pipefail
 
@@ -88,6 +100,11 @@ INIT_MARKER="$HGM/initial_polyglot/default_agent/.evaluated_with"
 INIT_KEY="$MODEL_HF hide_answers=${HGM_HIDE_ANSWERS:-0}"
 # Path of the final_result.json that holds the initial agent's held-out evaluation (written by `final`).
 INIT_HELDOUT="$ROOT/runs/initial_heldout_result.path"
+# harness-rsi: the little-coder root has its own cache, keyed also by the vendored commit.
+LC_CONFIG="config_local_lc.yaml"
+LC_INIT_MARKER="$HGM/initial_polyglot/lc_agent/.evaluated_with"
+LC_INIT_KEY="$MODEL_HF hide_answers=1 agent=littlecoder lc=$(cat "$HGM/lc/VENDORED_FROM" 2>/dev/null) protocol=${HGM_TEST_PROTOCOL:-visible_ro}"
+export LC_FIXED_DATE="${LC_FIXED_DATE:-2026-11-16 Monday}"
 
 # A running search: a python process whose script is hgm.py (not a shell or grep that mentions it).
 SEARCH_PREFIX='^[^ ]*python[0-9.]* hgm\.py'
@@ -102,6 +119,7 @@ record_setup() {  # what produced this run, for the experiment log
     echo "HGM commit: $(git -C "$HGM" rev-parse HEAD) dirty: $(git -C "$HGM" status --porcelain | wc -l | tr -d ' ') files"
     echo "HGM_FIX_DESCENDANT_EVALS=${HGM_FIX_DESCENDANT_EVALS:-1}"
     echo "HGM_DIAG_CLIP=${HGM_DIAG_CLIP:-0} HGM_MAX_HOURS=${HGM_MAX_HOURS:-} DGM_MAX_HOURS=${DGM_MAX_HOURS:-} HGM_HIDE_ANSWERS=${HGM_HIDE_ANSWERS:-0}"
+    echo "HGM_AGENT=${HGM_AGENT:-} HGM_COUPLED=${HGM_COUPLED:-0} HGM_TEST_PROTOCOL=${HGM_TEST_PROTOCOL:-visible_ro} LC_FIXED_DATE=$LC_FIXED_DATE lc=$(cat "$HGM/lc/VENDORED_FROM" 2>/dev/null)"
     echo "HGM_ERL_STOP=${HGM_ERL_STOP:-0} HGM_ERL_EXPAND=${HGM_ERL_EXPAND:-0} HGM_ERL_HISTORY=${HGM_ERL_HISTORY:-} W=${HGM_ERL_W:-auto} ALPHA=${HGM_ERL_ALPHA:-0.2} MIN_EVALS=${HGM_ERL_MIN_EVALS:-3} AUDIT=${HGM_ERL_AUDIT:-0} AUDIT_N=${HGM_ERL_AUDIT_N:-5}"
     [[ -n "${HGM_ERL_HISTORY:-}" ]] && echo "history sha256: $(sha256sum "$HGM_ERL_HISTORY" | cut -c1-16)"
     echo "config: $CONFIG"; cat "$HGM/$CONFIG"
@@ -122,8 +140,12 @@ check_init_marker() {
 
 search_run() {  # search_run <config> <label> <budget>
   local cfg=$1 label=$2 budget=$3 extra=() fix=1 erl=0 erl_hist="" erlx=0 audit="${HGM_ERL_AUDIT:-0}"
+  local agent="" coupled=0 config="$CONFIG" hide="${HGM_HIDE_ANSWERS:-0}"
   case "$cfg" in
     hgm-fixed) ;;
+    hgm-lc)              agent=littlecoder config="$LC_CONFIG" hide=1 ;;
+    hgm-lc-coupled)      agent=littlecoder config="$LC_CONFIG" hide=1 coupled=1 ;;
+    hgm-lc-coupled-erlx) agent=littlecoder config="$LC_CONFIG" hide=1 coupled=1 erl=1 erl_hist="$ROOT/runs/erl_history.json" erlx=1 ;;
     hgm-orig)  fix=0 ;;
     hgm-erl)   erl=1 erl_hist="$ROOT/runs/erl_history.json" ;;
     hgm-erlx)  erl=1 erl_hist="$ROOT/runs/erl_history.json" erlx=1 ;;   # + retired children free expansion slots
@@ -157,13 +179,14 @@ search_run() {  # search_run <config> <label> <budget>
     log "$label: output exists, continuing it"
     extra+=(--continue_from "$out")
   fi
-  HGM_ERL_STOP=$erl HGM_ERL_HISTORY=$erl_hist HGM_ERL_EXPAND=$erlx HGM_ERL_AUDIT=$audit HGM_FIX_DESCENDANT_EVALS=$fix record_setup "$label"
+  HGM_AGENT=$agent HGM_COUPLED=$coupled HGM_ERL_STOP=$erl HGM_ERL_HISTORY=$erl_hist HGM_ERL_EXPAND=$erlx HGM_ERL_AUDIT=$audit HGM_FIX_DESCENDANT_EVALS=$fix record_setup "$label"
   local cap=""
   [[ "$cfg" == dgm && -n "$DGM_MAX_HOURS" ]] && cap=" or $DGM_MAX_HOURS h"
   [[ "$cfg" != dgm && -n "${HGM_MAX_HOURS:-}" ]] && cap=" or $HGM_MAX_HOURS h"
   log "$label: start ($cfg, budget $budget$cap)"
   local rc=0
-  (cd "$HGM" && HGM_ERL_STOP=$erl HGM_ERL_HISTORY=$erl_hist HGM_ERL_EXPAND=$erlx HGM_ERL_AUDIT=$audit HGM_FIX_DESCENDANT_EVALS=$fix RSI_RUN="$label" python hgm.py --config "$CONFIG" --polyglot \
+  (cd "$HGM" && HGM_AGENT=$agent HGM_COUPLED=$coupled HGM_COUPLED_TASKS=$coupled HGM_HIDE_ANSWERS=$hide \
+      HGM_ERL_STOP=$erl HGM_ERL_HISTORY=$erl_hist HGM_ERL_EXPAND=$erlx HGM_ERL_AUDIT=$audit HGM_FIX_DESCENDANT_EVALS=$fix RSI_RUN="$label" python hgm.py --config "$config" --polyglot \
       --max_task_evals "$budget" --output_dir "$out" "${extra[@]}" 2>&1 \
       | capped_log "$ROOT/runs/$label.stdout.log") || rc=$?
   # A run counts as finished only if it spent its budget (task evaluations, or the DGM hour cap);
@@ -306,6 +329,46 @@ case "${1:-}" in
         --max_task_evals 0 --output_dir output_hgm/initial-eval > "$ROOT/runs/initial-eval.stdout.log" 2>&1)
     echo "$INIT_KEY" > "$INIT_MARKER"
     log "initial-eval: done"
+    ;;
+
+  smoke-lc)
+    # harness-rsi: integration checks, then the root and two hand-made children on 4 tasks.
+    (cd "$HGM" && python scripts/lc_smoke.py checks) || exit 1
+    (cd "$HGM" && HGM_HIDE_ANSWERS=1 RSI_RUN=smoke-lc python scripts/lc_smoke.py coupled "${SMOKE_TASKS:-4}" \
+        2>&1 | tee "$ROOT/runs/smoke-lc.log")
+    ;;
+
+  init-lc)
+    # harness-rsi: evaluate the little-coder root on the 59 search tasks once, recording every
+    # trajectory (initial_polyglot/lc_agent/records). Every hgm-lc* run copies it as node "initial",
+    # so children of the root can fork from these records.
+    if [[ -f "$LC_INIT_MARKER" && "$(cat "$LC_INIT_MARKER")" == "$LC_INIT_KEY" ]]; then
+      log "little-coder root already evaluated with $LC_INIT_KEY"; exit 0
+    fi
+    if [[ -d "$HGM/initial_polyglot/lc_agent" ]]; then
+      mv "$HGM/initial_polyglot/lc_agent" "$HGM/initial_polyglot/lc_agent.bak.$(date +%s)"
+    fi
+    HGM_AGENT=littlecoder record_setup initial-eval-lc
+    log "initial-eval-lc: start"
+    (cd "$HGM" && HGM_AGENT=littlecoder HGM_HIDE_ANSWERS=1 RSI_RUN=initial-eval-lc python hgm.py --config "$LC_CONFIG" \
+        --polyglot --search dgm --max_task_evals 0 --output_dir output_hgm/initial-eval-lc \
+        > "$ROOT/runs/initial-eval-lc.stdout.log" 2>&1)
+    echo "$LC_INIT_KEY" > "$LC_INIT_MARKER"
+    log "initial-eval-lc: done"
+    ;;
+
+  pilot-lc)
+    [[ -f "$LC_INIT_MARKER" && "$(cat "$LC_INIT_MARKER")" == "$LC_INIT_KEY" ]] || { echo "run ./run_all.sh init-lc first" >&2; exit 1; }
+    for cfg in hgm-lc hgm-lc-coupled; do search_run "$cfg" "pilot-$cfg" 50; done
+    python "$INST/analyze_ledger.py" "$RSI_LEDGER" --run pilot-hgm-lc || true
+    python "$INST/analyze_ledger.py" "$RSI_LEDGER" --run pilot-hgm-lc-coupled || true
+    ;;
+
+  search-lc)
+    [[ -f "$LC_INIT_MARKER" && "$(cat "$LC_INIT_MARKER")" == "$LC_INIT_KEY" ]] || { echo "run ./run_all.sh init-lc first" >&2; exit 1; }
+    for r in ${REPEATS:-0 1 2}; do
+      for cfg in ${LC_CONFIGS:-hgm-lc hgm-lc-coupled}; do search_run "$cfg" "$cfg-r$r" "${BUDGET:-800}"; done
+    done
     ;;
 
   pilot)

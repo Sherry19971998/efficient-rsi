@@ -90,7 +90,7 @@ def coupled(n):
     os.environ.setdefault("HGM_HIDE_ANSWERS", "1")
     os.environ.setdefault("LC_FIXED_DATE", "2026-11-16 Monday")
     import polyglot.harness as H
-    H.llm = "vllm-qwen3c-local"
+    H.llm = os.getenv("LC_SMOKE_MODEL", "vllm-qwen3c-local")   # run_all.sh passes the served model name
     tasks = json.load(open("polyglot/subsets/small.json"))[:n]
     out = Path("output_hgm/lc-smoke")
     if out.exists():

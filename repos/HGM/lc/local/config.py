@@ -83,6 +83,20 @@ MODEL_PROFILES: dict[str, dict] = {
         "n_branches": 1,
         "prefer_text_tools": False,
     },
+    # harness-rsi (efficient-rsi integration, LC_MODEL=qwen35-9b): RedHatAI/Qwen3.5-9B-FP8-dynamic served
+    # as "vllm-qwen3.5-9b"; same settings as the "qwen3.5" profile used in the ICRN experiments.
+    "vllm-qwen3.5-9b": {
+        "context_limit": 32768,
+        "max_tokens": 4096,
+        "thinking_budget": 2048,
+        "skill_token_budget": 300,
+        "knowledge_token_budget": 200,
+        "system_prompt_budget": 0,
+        "max_retries": 1,
+        "temperature": 0.3,
+        "deliberation_mode": "on_failure",
+        "n_branches": 2,
+    },
     "qwen3.6-35b-a3b": {
         "context_limit": 16384,   # match llama-server launch script; model supports 262K native
         "max_tokens": 4096,

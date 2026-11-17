@@ -91,6 +91,16 @@ output_hgm/<run>/<node>/predictions/<node>_0/<task>_rsi.json   attempt summary +
 output_hgm/<run>/<node>/predictions/<node>_0/<task>.json       result, with lc_route, lc_cost, tests_modified
 ```
 
+## 3b. Small tests on one A100 with Qwen3.5-9B (`LC_MODEL=qwen35-9b`)
+
+The model of the harness-rsi ICRN experiments (`RedHatAI/Qwen3.5-9B-FP8-dynamic`, ~13.4 GB) fits one
+A100 with room for HGM's 20 workers at 32K context (KV estimate: 20 x 32,768 x ~33 KB per token ~ 21 GB).
+Set `LC_MODEL=qwen35-9b` for every command of the session, including `./run_all.sh vllm`: it serves the
+model as `vllm-qwen3.5-9b` (32K, `--reasoning-parser qwen3`; vLLM >= 0.33, the ICRN runs used 0.33.0),
+uses `config_local_lc_qwen35.yaml` and keeps the root's evaluation in `initial_polyglot/lc_agent_qwen35`.
+Numbers from this model do not transfer to the 30B model; it is for checking that the pipeline works and
+for the route histogram on a model whose replay behaviour was already measured.
+
 ## 4. Run order on the H100 (Qwen3-Coder-30B-A3B-Instruct-FP8, Docker)
 
 1. `./run_all.sh vllm`, `proxy`, `gpu` (as before), then `./run_all.sh check`.

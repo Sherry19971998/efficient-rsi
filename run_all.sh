@@ -56,6 +56,8 @@
 #                                     only from the divergence point) + parent-recorded tasks first
 #                     hgm-lc-coupled-erlx  + efficient-rsi's node stopping (hgm-erlx)
 #   HGM_TEST_PROTOCOL=visible_ro   harness-rsi arms: tests visible and read-only, hashed (default)
+#   LC_MODEL=qwen35-9b   harness-rsi: serve and run RedHatAI/Qwen3.5-9B-FP8-dynamic (one A100, small tests)
+#                     instead of Qwen3-Coder-30B-A3B; set it for the vllm command and every run command
 #   LC_FIXED_DATE="2026-11-16 Monday"   date in the agent's system prompt; the same for every run so
 #                     records replay across runs and across the shared initial evaluation
 
@@ -67,6 +69,20 @@ INST="$ROOT/instrumentation"
 CONFIG="config_local.yaml"
 MODEL_HF="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 MODEL_NAME="vllm-qwen3c-local"   # must contain "vllm" and must not contain "gpt" (llm.py routing)
+VLLM_MAX_LEN=131072
+VLLM_EXTRA=()
+LC_CONFIG="config_local_lc.yaml"   # harness-rsi arms (see LC_MODEL)
+LC_AGENT_DIR="lc_agent"
+# harness-rsi: LC_MODEL=qwen35-9b serves RedHatAI/Qwen3.5-9B-FP8-dynamic instead (the model of the
+# ICRN experiments; fits one A100, needs vLLM >= 0.33 for Qwen3.5). Use it for every command of a
+# session (vllm, check, smoke-lc, init-lc, pilot-lc): the server and the runs must agree.
+case "${LC_MODEL:-qwen3coder-30b}" in
+  qwen3coder-30b) ;;
+  qwen35-9b)
+    MODEL_HF="RedHatAI/Qwen3.5-9B-FP8-dynamic"; MODEL_NAME="vllm-qwen3.5-9b"; VLLM_MAX_LEN=32768
+    VLLM_EXTRA=(--reasoning-parser qwen3); LC_CONFIG="config_local_lc_qwen35.yaml"; LC_AGENT_DIR="lc_agent_qwen35" ;;
+  *) echo "unknown LC_MODEL=$LC_MODEL (qwen3coder-30b | qwen35-9b)" >&2; exit 1 ;;
+esac
 VLLM_PORT=8000
 PROXY_PORT=8787
 BRIDGE="${BRIDGE:-172.17.0.1}"   # docker0 address (ip -4 addr show docker0); containers reach the proxy here
@@ -101,8 +117,7 @@ INIT_KEY="$MODEL_HF hide_answers=${HGM_HIDE_ANSWERS:-0}"
 # Path of the final_result.json that holds the initial agent's held-out evaluation (written by `final`).
 INIT_HELDOUT="$ROOT/runs/initial_heldout_result.path"
 # harness-rsi: the little-coder root has its own cache, keyed also by the vendored commit.
-LC_CONFIG="config_local_lc.yaml"
-LC_INIT_MARKER="$HGM/initial_polyglot/lc_agent/.evaluated_with"
+LC_INIT_MARKER="$HGM/initial_polyglot/$LC_AGENT_DIR/.evaluated_with"
 LC_INIT_KEY="$MODEL_HF hide_answers=1 agent=littlecoder lc=$(cat "$HGM/lc/VENDORED_FROM" 2>/dev/null) protocol=${HGM_TEST_PROTOCOL:-visible_ro}"
 export LC_FIXED_DATE="${LC_FIXED_DATE:-2026-11-16 Monday}"
 
@@ -271,8 +286,9 @@ case "${1:-}" in
   vllm)
     cmd=("$VLLM_BIN" serve "$MODEL_HF" --port "$VLLM_PORT" --served-model-name "$MODEL_NAME"
          --enable-auto-tool-choice --tool-call-parser qwen3_coder
-         --max-model-len 131072 --gpu-memory-utilization 0.92 --enable-prefix-caching
-         --enable-prompt-tokens-details)   # reports cached (prefix-hit) prompt tokens in usage
+         --max-model-len "$VLLM_MAX_LEN" --gpu-memory-utilization 0.92 --enable-prefix-caching
+         --enable-prompt-tokens-details   # reports cached (prefix-hit) prompt tokens in usage
+         ${VLLM_EXTRA[@]+"${VLLM_EXTRA[@]}"})
     # DeepGEMM's FP8 MoE kernels JIT-compile against a CUDA toolkit; engr-liu01s only has 12.4
     # while this vLLM is built for cu13, so fall back to vLLM's other FP8 kernels.
     # FlashInfer's sampler is JIT-built with nvcc too, which the server lacks (same setting as RSI-Text-to-SQL).
@@ -334,7 +350,7 @@ case "${1:-}" in
   smoke-lc)
     # harness-rsi: integration checks, then the root and two hand-made children on 4 tasks.
     (cd "$HGM" && python scripts/lc_smoke.py checks) || exit 1
-    (cd "$HGM" && HGM_HIDE_ANSWERS=1 RSI_RUN=smoke-lc python scripts/lc_smoke.py coupled "${SMOKE_TASKS:-4}" \
+    (cd "$HGM" && HGM_HIDE_ANSWERS=1 RSI_RUN=smoke-lc LC_SMOKE_MODEL="$MODEL_NAME" python scripts/lc_smoke.py coupled "${SMOKE_TASKS:-4}" \
         2>&1 | tee "$ROOT/runs/smoke-lc.log")
     ;;
 
@@ -345,8 +361,8 @@ case "${1:-}" in
     if [[ -f "$LC_INIT_MARKER" && "$(cat "$LC_INIT_MARKER")" == "$LC_INIT_KEY" ]]; then
       log "little-coder root already evaluated with $LC_INIT_KEY"; exit 0
     fi
-    if [[ -d "$HGM/initial_polyglot/lc_agent" ]]; then
-      mv "$HGM/initial_polyglot/lc_agent" "$HGM/initial_polyglot/lc_agent.bak.$(date +%s)"
+    if [[ -d "$HGM/initial_polyglot/$LC_AGENT_DIR" ]]; then
+      mv "$HGM/initial_polyglot/$LC_AGENT_DIR" "$HGM/initial_polyglot/$LC_AGENT_DIR.bak.$(date +%s)"
     fi
     HGM_AGENT=littlecoder record_setup initial-eval-lc
     log "initial-eval-lc: start"

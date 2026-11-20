@@ -22,6 +22,7 @@ from utils.docker_utils import copy_src_files
 import hgm_utils
 import rsi_ledger
 import lc_integration
+import sift
 from config import load_config
 from tree import Node
 from utils.common_utils import load_json_file
@@ -264,6 +265,7 @@ def main():
     parser.set_defaults(polyglot=None, cool_down=None, full_eval=None)
 
     args = parser.parse_args()
+    sift.validate_search_budget(args.max_hours)
 
     overrides = {}
     if args.max_task_evals is not None:
@@ -405,9 +407,23 @@ def main():
         rsi_ledger.event("erl_start", expand=erl_expand, alpha=erl_stop.alpha, min_evals=erl_stop.min_evals, w=str(erl_stop.w),
                          history_rows=len(erl_stop.hist[0]), seeded=len(erl_stop.states))
 
-    def TS_sample(evals):
+    # SIFT ordering (SIFT_MODE=qwen, SIFT_ENFORCE=1): a child's Qwen score, ranked among all scored
+    # children, adds SIFT_ORDER_WEIGHT imaginary tasks to the start of its evaluation sampling
+    # (sift.order_priors). No child is removed, and real results outweigh it after a few tasks.
+    # Without scores every prior is (0, 0) and sampling is exactly as before.
+    order_scores = {}
+
+    def order_score(node):
+        if node.commit_id not in order_scores:
+            order_scores[node.commit_id] = sift.read_order_score(os.path.join(output_dir, node.commit_id))
+        return order_scores[node.commit_id]
+
+    def TS_sample(evals, priors=None):
         alphas = [1 + np.sum(de) for de in evals]
         betas = [1 + len(de) - np.sum(de) for de in evals]
+        if priors is not None:
+            alphas = [a + a0 for a, (a0, _) in zip(alphas, priors)]
+            betas = [b + b0 for b, (_, b0) in zip(betas, priors)]
         if opt_cfg.cool_down:
             alphas = np.array(alphas) * (
                 10000
@@ -464,6 +480,7 @@ def main():
             selected_node.commit_id,
             image_name=path_cfg.initial_agent_name + ":latest",
         )
+        child_commit = hgm_utils.sift_child(child_commit, selected_node.commit_id, src_path)
         rsi_ledger.event("node_created" if child_commit != "failed" else "propose_failed",
                          node=None if child_commit == "failed" else child_commit,
                          parent=selected_node.commit_id)
@@ -505,6 +522,7 @@ def main():
 
         with lock:
             nodes = hgm_utils.nodes[0].get_sub_tree(fn=lambda node: node)
+            pool = [s for s in map(order_score, nodes) if s is not None]   # every scored child, for ranking
             nodes = [
                 node for node in nodes if len(submitted_ids[node.id]) < total_num_tasks
                 and (erl_stop is None or erl_stop.allow(node.commit_id))
@@ -512,7 +530,8 @@ def main():
             evals = [node.utility_measures for node in nodes]
             if len(evals) == 0:
                 return
-            selected_node = nodes[TS_sample(evals)]
+            priors = sift.order_priors([order_score(n) for n in nodes], pool) if pool else None
+            selected_node = nodes[TS_sample(evals, priors)]
             available_tasks = list(
                 [
                     task

@@ -65,6 +65,8 @@ def get_all_performance(run_keyword, results_dir="./swe_bench", does_print=True)
     total_resolved_ids = []
     total_emptypatch_ids = []
     total_submitted_ids = []
+    total_incomplete_ids = []
+    total_error_ids = []
 
     # Return an empty list if no matches are found
     if not matching_files:
@@ -92,6 +94,8 @@ def get_all_performance(run_keyword, results_dir="./swe_bench", does_print=True)
             total_emptypatch_ids.extend(eval_results.get("empty_patch_ids", []))
             total_resolved_ids.extend(eval_results.get("resolved_ids", []))
             total_submitted_ids.extend(eval_results.get("submitted_ids", []))
+            total_incomplete_ids.extend(eval_results.get("incomplete_ids", []))
+            total_error_ids.extend(eval_results.get("error_ids", []))
 
     # Calculate the overall accuracy score
     overall_performance = {}
@@ -107,6 +111,8 @@ def get_all_performance(run_keyword, results_dir="./swe_bench", does_print=True)
     overall_performance["total_emptypatch_ids"] = total_emptypatch_ids
     overall_performance["total_resolved_ids"] = total_resolved_ids
     overall_performance["total_submitted_ids"] = total_submitted_ids
+    overall_performance["total_incomplete_ids"] = total_incomplete_ids
+    overall_performance["total_error_ids"] = total_error_ids
 
     return performance_results, overall_performance
 

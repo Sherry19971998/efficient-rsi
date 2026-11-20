@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+import task_records
 
 LC_DIR = "lc"                         # inside repos/HGM and inside every container (/hgm/lc)
 # Characters of notes.md a child inherits (HGM_LC_NOTES_CAP). 24000 characters is about 6K tokens:
@@ -111,6 +112,11 @@ def record_prefix(node_dir, task):
 
 
 def has_record(node_dir, task):
+    for result_path in (Path(node_dir) / "predictions").glob(f"*/{task}.json"):
+        result = task_records.read_json(result_path) or {}
+        card = task_records.load_card(result, result_path.parent)
+        if card and card.get("execution", {}).get("exit_code") != 0:
+            return False
     p = record_prefix(node_dir, task)
     return Path(str(p) + ".jsonl").exists() and Path(str(p) + ".req.jsonl.gz").exists()
 
@@ -351,9 +357,13 @@ def build_workspace(output_root, parent_commit, focus_task, dest, max_trajectori
         cat = "resolved" if r.get("eval_result") == "resolved" else (
             r.get("eval_result") if r.get("eval_result") in ("empty_patch", "incomplete", "error")
             else _failure_category(ev.read_text(errors="replace") if ev.exists() else ""))
+        card = task_records.load_card(r, pred)
+        if card and task_records.feedback_enabled():
+            cat = task_records.failure_class(card)
         rows.append({"task": tid, "eval_result": r.get("eval_result"), "failure_class": cat,
                      "tests_modified": r.get("tests_modified", False), "turns": att.get("turns"),
                      "route": r.get("lc_route"), "agent_error": att.get("error"),
+                     "task_record": r.get("task_record"),
                      **{k: v for k, v in record_cost(record_prefix(pdir, tid)).items()
                         if k in ("live_calls", "model_s", "uncached_in_plus_out")}})
     (dest / "digest.json").write_text(json.dumps(rows, indent=1))
@@ -367,6 +377,14 @@ def build_workspace(output_root, parent_commit, focus_task, dest, max_trajectori
     (dest / "digest.md").write_text("\n".join(md) + "\n")
 
     failed = [x["task"] for x in rows if x["eval_result"] != "resolved"]
+    if task_records.feedback_enabled():
+        summary, selected = task_records.feedback_summary(pdir, focus_task, max_trajectories)
+        if summary:
+            (dest / "task_records.md").write_text(summary)
+            (dest / "selection.json").write_text(json.dumps({
+                "policy": "failure_classes_v1", "provided_attempts": [c["attempt_id"] for c in selected]}, indent=2))
+            priority = [c["task_id"] for c in selected]
+            failed = priority + [tid for tid in failed if tid not in priority]
     if focus_task in failed:
         failed.remove(focus_task)
         failed.insert(0, focus_task)
@@ -414,6 +432,8 @@ model is fixed. Your change is kept only if the changed harness solves more task
 Files here (open what you need; do not try to read everything):
 - digest.md / digest.json   results of the current version ({parent}) per task, with a failure class
                             computed from the test logs, turns used and model seconds
+- task_records.md           when present, observed stop reasons, grading and missing evidence from
+                            several representative tasks; ungraded is not the same as wrong
 - trajectories/<task>.md    full agent logs of failed tasks; start with {focus}
 - tests/<task>.txt          the test output of those tasks
 - patch_ledger.jsonl        every earlier version: which files it changed and how it scored

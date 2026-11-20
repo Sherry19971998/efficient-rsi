@@ -145,7 +145,7 @@ def main():
 
     log = open(args.chat_history_file, "w")
     state = agent.AgentState()
-    guard, error = [], None
+    guard, error, stop_reason = [], None, "normal"
     try:
         for e in agent.run(build_prompt(args), state, cfg, system):
             if isinstance(e, agent.TextChunk):
@@ -158,11 +158,17 @@ def main():
             elif isinstance(e, agent.ToolEnd):
                 log.write(f"Tool Result: {str(e.result)[:20000]}\n")
             log.flush()
-            if state.turn_count >= max_turns or time.time() > deadline:
+            if state.turn_count >= max_turns:
+                stop_reason = "turn_limit"
+                break
+            if time.time() > deadline:
+                stop_reason = "soft_deadline"
                 break
     except rsi_record.StopReplay as ex:
+        stop_reason = "replay_stop"
         error = f"replay_stop: {ex}"
     except Exception as ex:                     # the attempt still ends with a diff and exit 0
+        stop_reason = "agent_exception"
         error = f"{type(ex).__name__}: {ex}"
         log.write(f"\nAGENT ERROR: {error}\n")
     summary = rsi_record.end()
@@ -173,12 +179,10 @@ def main():
     (Path(args.outdir) / "model_patch.diff").write_text(patch)
     (Path(args.outdir) / "rsi_attempt.json").write_text(json.dumps(
         {"rsi": summary, "turns": state.turn_count, "error": error, "guard": guard,
+         "scope": "attempt", "stop_reason": stop_reason, "max_turns": max_turns,
          "seconds": round(time.time() - t0, 2), "self_improve": args.self_improve}, default=str))
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        sys.exit(0)
+    sys.exit(main())  # startup failures must remain observable to the host

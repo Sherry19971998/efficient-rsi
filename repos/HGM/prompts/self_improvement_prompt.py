@@ -310,17 +310,20 @@ def fit_prompt(system_message, prompt, limit, keep_tail=CLIP_KEEP_TAIL):
 
 
 def process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches, eval_results):
+    detailed_feedback = os.getenv("HGM_RECORD_FEEDBACK", "0") == "1"
     # NOTE: using only the first logs
     md_log = md_logs[0] if md_logs else "No logs available."
     eval_log = (
         eval_logs[0]
         if eval_logs
-        else "No test results available. Assume all tests failed."
+        else ("Test results were not collected; grading may not have run. Consult the task records."
+              if detailed_feedback else "No test results available. Assume all tests failed.")
     )
     predicted_patch = (
         predicted_patches[0]
         if predicted_patches
-        else "No predicted patch available. Assume the agent failed."
+        else ("No submitted patch was collected; this does not prove no edits were made."
+              if detailed_feedback else "No predicted patch available. Assume the agent failed.")
     )
 
     # truncate logs if too long
@@ -336,7 +339,8 @@ def process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches, eval_re
     eval_result = (
         eval_results[0]
         if eval_results
-        else "No evaluation result available. Assume the agent failed."
+        else ("Evaluation result unknown; consult the task records."
+              if detailed_feedback else "No evaluation result available. Assume the agent failed.")
     )
     return md_log, eval_log, predicted_patch, eval_result
 

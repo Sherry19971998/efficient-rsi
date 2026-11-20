@@ -76,6 +76,7 @@ def choose_parents(output_dir, archive, parent_of, k):
 
 def create_and_evaluate(parent, image_name, src_path, small, medium, max_workers):
     child = hgm_utils.sample_child(parent, image_name=image_name)
+    child = hgm_utils.sift_child(child, parent, src_path)
     if child == "failed":
         rsi_ledger.event("propose_failed", parent=parent)
         return None
@@ -94,6 +95,7 @@ def create_and_evaluate(parent, image_name, src_path, small, medium, max_workers
 
 def run(output_dir, src_path, image_name, max_task_evals, polyglot, n_parallel=None, max_workers=10, logger=None,
         max_hours=None):
+    hgm_utils.sift.validate_search_budget(max_hours)
     bench = "polyglot" if polyglot else "swe_bench"
     small = load_json_file(f"./{bench}/subsets/small.json")
     medium = load_json_file(f"./{bench}/subsets/medium.json")

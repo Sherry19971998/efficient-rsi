@@ -34,6 +34,8 @@ from utils.evo_utils import (get_all_performance, get_model_patch_paths,
 from utils.git_utils import remove_patch_by_files
 import rsi_ledger
 import lc_integration
+import task_records
+import sift
 
 dataset = None
 alpha = 0.5
@@ -92,9 +94,22 @@ def choose_entry(parent_commit, debug=False):
     """
     Choose entry for self-improvement given a parent commit.
     """
+    if polyglot and task_records.feedback_enabled():
+        cards = task_records.latest_cards(os.path.join(output_dir, parent_commit))
+        # Sample a failure class first so a frequent ordinary wrong answer does not
+        # permanently hide timeouts/crashes. Setup failures need environment diagnosis.
+        groups = {}
+        for card in cards:
+            category = task_records.failure_class(card)
+            if category not in ("resolved", "setup_error"):
+                groups.setdefault(category, []).append(card["task_id"])
+        if groups:
+            return random.choice(groups[random.choice(sorted(groups))])
     try:
         metadata_path = os.path.join(output_dir, parent_commit, "metadata.json")
         metadata = load_json_file(metadata_path)
+        incomplete_ids = metadata["overall_performance"].get("total_incomplete_ids", [])
+        error_ids = metadata["overall_performance"].get("total_error_ids", [])
         metadata = {
             "accuracy_score": metadata["overall_performance"]["accuracy_score"],
             "total_unresolved_ids": metadata["overall_performance"][
@@ -120,6 +135,8 @@ def choose_entry(parent_commit, debug=False):
 
     if polyglot:
         entry_ids = empty_ids + unresolved_ids
+        if task_records.feedback_enabled():
+            entry_ids = list(dict.fromkeys(entry_ids + incomplete_ids + error_ids))
         if not entry_ids:
             entry_ids = resolved_ids + empty_ids + unresolved_ids
         entry = random.choice(entry_ids)
@@ -278,6 +295,20 @@ def eval_agent(
     metadata["overall_performance"] = overall_performance
     save_metadata(metadata, os.path.join(root_dir, output_dir, commit_id))
     return get_acc_on_tasks(tasks, os.path.join(root_dir, output_dir, commit_id))
+
+
+def sift_child(child_commit, parent_commit, init_agent_path):
+    """Run once after proposal creation, before the child is added to the search archive."""
+    if child_commit == "failed" or not polyglot or os.getenv("SIFT_MODE", "off") == "off":
+        return child_commit
+    from polyglot import harness as eval_harness
+    root_dir = os.path.abspath("./")
+    skipped = sift.run_gate(
+        os.path.join(output_dir, child_commit), os.path.join(output_dir, parent_commit),
+        init_agent_path, get_model_patch_paths(root_dir, output_dir, parent_commit),
+        agent_kind="littlecoder" if lc_integration.enabled() else "original",
+        timeout_s=eval_harness.timeout, ledger=rsi_ledger)
+    return "failed" if skipped else child_commit
 
 
 def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):

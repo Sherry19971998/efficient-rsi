@@ -7,10 +7,12 @@ import os
 import random
 import re
 import subprocess
+import uuid
 
 import docker
 
 import rsi_ledger
+import task_records
 from llm import create_client, extract_json_between_markers, get_response_from_llm
 
 from prompts.self_improvement_prompt import (get_diagnose_prompt_polyglot,
@@ -50,6 +52,16 @@ def diagnose_problem(
             patch_files=patch_files,
         )
     from prompts.self_improvement_prompt import CLIP_TOTAL, DIAG_CLIP, fit_prompt
+    if polyglot and task_records.feedback_enabled():
+        summary, selected = task_records.feedback_summary(os.path.join(out_dir, commit), entry)
+        if summary:
+            # Prepend bounded facts so prompt clipping does not discard the failure summary.
+            diagnose_prompt = summary + "\n\n" + diagnose_prompt
+            proposal = rsi_ledger.bound("node") or commit
+            task_records.atomic_json(os.path.join(out_dir, proposal, "diagnosis_selections", uuid.uuid4().hex + ".json"), {
+                "policy": "failure_classes_v1", "focus_task": entry,
+                "provided_attempts": [c["attempt_id"] for c in selected],
+                "note": "provided to the diagnosis prompt; this does not prove model attention"})
     if DIAG_CLIP:
         # each retry (max_attempts 2 -> 1 -> 0) shrinks the limit by a quarter, in case some text
         # tokenizes denser than measured: 300k, 225k, 169k characters

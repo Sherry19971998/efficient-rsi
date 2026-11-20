@@ -25,6 +25,8 @@ from swe_bench.utils import (copy_from_container, copy_to_container,
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
 import rsi_ledger
 import lc_integration
+import task_records
+import shutil
 
 llm = ""
 timeout = 1800  # seconds
@@ -65,9 +67,12 @@ def process_entry(
         return result
 
     # Initialize container as None to avoid UnboundLocalError
-    container = None
+    container, client, logger = None, None, None
+    card = task_records.TaskRecord(out_dname, entry, model_name_or_path, llm, "original",
+                                   timeout, model_patch_paths, init_agent_path)
+    result = {"instance_id": instance_id, "eval_result": "incomplete", "success": False}
 
-    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
+    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id, attempt_id=card.id)
     phases.phase("setup")
     try:
         # Create and start the Docker container
@@ -195,29 +200,13 @@ def process_entry(
         ]
         env_vars.update(rsi_ledger.proxy_env("eval", model_name_or_path, instance_id))
         phases.phase("agent_run")
+        card.phase("solve")
         exec_result = container.exec_run(cmd, environment=env_vars, workdir="/testbed/")
-        log_container_output(exec_result)
-
-        # Copy output files back to host
-        logger.info("Copying output files back to host")
-        copy_from_container(container, chat_history_file_container, chat_history_file)
-        # Additional chat history files
-        exec_result = container.exec_run(
-            f"find /hgm/ -name '{instance_id}_*.md'", workdir="/"
-        )
-        chat_history_files_container = exec_result.output.decode().split()
-        for chat_history_file_container in chat_history_files_container:
-            chat_history_file = out_dname / Path(chat_history_file_container).name
-            copy_from_container(
-                container, chat_history_file_container, chat_history_file
-            )
-
-        # Get model_patch
-        logger.info("Getting model_patch")
-        exec_result = container.exec_run("cat /hgm/model_patch.diff")
-        log_container_output(exec_result)
-        model_patch = ""
-        model_patch = exec_result.output.decode()
+        card.agent_exit(exec_result)
+        log_container_output(exec_result, raise_error=False)
+        card.collect(container, copy_from_container)
+        _publish_task_artifacts(card, out_dname)
+        model_patch = card.patch_for_grading()
 
         # Additional proposed model patches
         proposed_model_patches = []
@@ -242,54 +231,11 @@ def process_entry(
                 "eval_result": eval_result,
             }
 
-        if hide_answers():
-            # The agent is done. Stop anything it left running, so no part of it is alive when
-            # the tests arrive, then fetch the commit with the tests from the task's repo on the
-            # host: the image no longer has it (polyglot/test_spec.py, HGM_HIDE_ANSWERS)
-            exec_result = container.exec_run("sh -c 'kill -9 -1 || true'", workdir="/")
-            log_container_output(exec_result)
-            copy_to_container(container, Path(entry["repo"]) / ".git", "/tmp/answer_repo/.git")
-            # The copy keeps the host's file owner, and git won't read a repository owned by
-            # another user unless told it is safe (a command-line -c is not enough for the
-            # repository it fetches from). The container is thrown away after grading.
-            exec_result = container.exec_run(
-                "git config --global --add safe.directory '*'", workdir="/"
-            )
-            log_container_output(exec_result)
-            exec_result = container.exec_run(
-                "git -C /testbed fetch --quiet /tmp/answer_repo HEAD", workdir="/"
-            )
-            log_container_output(exec_result)
-
-        exec_result = container.exec_run(
-            "git -C /testbed stash push " + " ".join(entry["files"]["solution"]),
-            workdir="/",
-        )
-        log_container_output(exec_result)
-        exec_result = container.exec_run(
-            f"git -C /testbed reset --hard {entry['test_commit']}", workdir="/"
-        )
-        log_container_output(exec_result)
-        exec_result = container.exec_run(f"git -C /testbed clean -fd", workdir="/")
-        log_container_output(exec_result)
-        exec_result = container.exec_run("git -C /testbed stash pop", workdir="/")
-        log_container_output(exec_result)
-
-        safe_log("Running the eval")
-        language = entry["language"]
-        test_command = TEST_COMMANDS[language]
-
-        eval_file.write_text(get_eval_script(test_command))
-
-        copy_to_container(container, eval_file, "/testbed/eval.sh")
-        exec_result = container.exec_run("ls -R /testbed", workdir="/")
-        log_container_output(exec_result)
-        exec_result = container.exec_run("chmod +x /testbed/eval.sh", workdir="/")
-        log_container_output(exec_result)
-
-        exec_result = container.exec_run("timeout 120 ./eval.sh", workdir="/testbed")
+        card.phase("grade")
+        exec_result = _score_in_container(container, entry, eval_file)
         log_container_output(exec_result, raise_error=False)
-        eval_result_file.write_text(exec_result.output.decode())
+        eval_result_file.write_text(exec_result.output.decode(errors="replace"))
+        card.grade(exec_result)
         if exec_result.exit_code == 0:
             eval_result = "resolved"
         else:
@@ -309,6 +255,7 @@ def process_entry(
         return {"success": True, "instance_id": instance_id, "eval_result": eval_result}
 
     except Exception as e:
+        card.error(e)
         # Check if eval_result exists in local scope
         if "eval_result" not in locals():
             eval_result = "incomplete"
@@ -331,7 +278,8 @@ def process_entry(
         out_fname.write_text(json.dumps(result, indent=4))
 
         # print(f"Error processing entry {instance_id}: {str(e)}")
-        logger.error(f"Error processing entry {instance_id}: {str(e)}")
+        if logger is not None:
+            logger.error(f"Error processing entry {instance_id}: {str(e)}")
         return {
             "success": False,
             "instance_id": instance_id,
@@ -339,6 +287,7 @@ def process_entry(
         }
 
     finally:
+        _finish_task_record(card, container, result, out_dname)
         phases.done()
         # Clean up docker container
         try:
@@ -346,6 +295,37 @@ def process_entry(
                 cleanup_container(client, container, logger)
         except Exception as e:
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
+
+
+def _publish_task_artifacts(card, out_dir, record_prefix=None):
+    """Keep legacy readers working; the attempt directory retains the original evidence."""
+    for name, legacy in (("trajectory.md", f"{card.task}.md"), ("agent_attempt.json", f"{card.task}_rsi.json")):
+        source = card.dir / name
+        if source.exists():
+            shutil.copy2(source, Path(out_dir) / legacy)
+    for source in card.data["evidence"].get("additional_trace_paths", []):
+        shutil.copy2(source, Path(out_dir) / Path(source).name)
+    # Only completed attempts supply replay caches; incomplete records stay in the card directory.
+    if record_prefix is not None and card.data["execution"]["exit_code"] == 0:
+        for suffix in (".jsonl", ".req.jsonl.gz", ".replay", ".replay.req.jsonl.gz", ".side.jsonl"):
+            source = card.dir / ("record" + suffix)
+            if source.exists():
+                shutil.copy2(source, Path(str(record_prefix) + suffix))
+
+
+def _finish_task_record(card, container, result, out_dir):
+    try:
+        if not card.collected and card.data["execution"].get("stage") == "solve":
+            card.collect(container, copy_from_container)
+            _publish_task_artifacts(card, out_dir)
+        docker_log = Path(out_dir) / f"{card.task}_docker.log"
+        if docker_log.exists():
+            shutil.copy2(docker_log, card.dir / "runner.log")
+            card.data["evidence"]["runner_log_path"] = str(card.dir / "runner.log")
+        card.finish(result)
+    except Exception as exc:
+        # Logging failure must not turn an original timeout into a different execution outcome.
+        safe_log(f"Task record could not be finalized ({card.id}): {exc}")
 
 
 def _score_in_container(container, entry, eval_file):
@@ -357,7 +337,8 @@ def _score_in_container(container, entry, eval_file):
         container.exec_run("git config --global --add safe.directory '*'", workdir="/")
         log_container_output(container.exec_run("git -C /testbed fetch --quiet /tmp/answer_repo HEAD", workdir="/"))
     log_container_output(container.exec_run(
-        "git -C /testbed stash push " + " ".join(entry["files"]["solution"]), workdir="/"))
+        ["git", "--literal-pathspecs", "-C", "/testbed", "stash", "push", "--include-untracked", "--",
+         *entry["files"]["solution"]], workdir="/"))
     log_container_output(container.exec_run(f"git -C /testbed reset --hard {entry['test_commit']}", workdir="/"))
     log_container_output(container.exec_run("git -C /testbed clean -fd", workdir="/"))
     log_container_output(container.exec_run("git -C /testbed stash pop", workdir="/"))
@@ -398,7 +379,9 @@ def process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
 
     container, client, logger = None, None, None
     eval_result, model_patch, attempt, tests_modified = "incomplete", "", {}, False
-    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id)
+    card = task_records.TaskRecord(out_dname, entry, model_name_or_path, llm, "littlecoder",
+                                   timeout, model_patch_paths, init_agent_path)
+    phases = rsi_ledger.Phases("eval", node=model_name_or_path, task=instance_id, attempt_id=card.id)
     phases.phase("setup")
     try:
         client = docker.from_env()
@@ -458,20 +441,14 @@ def process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
                "--outdir", "/hgm/", "--test_description", get_test_description(eval_cmd, polyglot=True),
                "--language", entry["language"], "--model", llm, "--timeout", str(timeout)]
         phases.phase("agent_run")
-        log_container_output(container.exec_run(cmd, environment=env_vars, workdir="/testbed/"))
-
-        copy_from_container(container, f"/hgm/{chat_history_file.name}", chat_history_file)
-        copy_from_container(container, "/hgm/rsi_attempt.json", attempt_file)
-        for suffix in (".jsonl", ".req.jsonl.gz", ".replay", ".replay.req.jsonl.gz", ".side.jsonl"):
-            try:
-                copy_from_container(container, "/hgm/record/rec" + suffix, Path(str(rec_host) + suffix))
-            except Exception:
-                pass                      # optional files (no side calls, no replay log)
-        try:
-            attempt = json.loads(attempt_file.read_text())
-        except Exception:
-            attempt = {}
-        model_patch = container.exec_run("cat /hgm/model_patch.diff").output.decode()
+        card.phase("solve")
+        agent_result = container.exec_run(cmd, environment=env_vars, workdir="/testbed/")
+        card.agent_exit(agent_result)
+        log_container_output(agent_result, raise_error=False)
+        card.collect(container, copy_from_container)
+        _publish_task_artifacts(card, out_dname, rec_host)
+        attempt = card.data["evidence"].get("agent_report", {})
+        model_patch = card.patch_for_grading()
         if protected:
             tests_modified = lc_integration.sha256_map(container, protected) != hashes_before
             # the visible copies are untracked; grading checks out the real tests from test_commit
@@ -481,16 +458,21 @@ def process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
         if not model_patch:
             eval_result = "empty_patch"
         else:
+            card.phase("grade")
             r = _score_in_container(container, entry, eval_file)
+            card.grade(r, tests_modified)
             eval_result_file.write_text(r.output.decode())
             eval_result = "resolved" if r.exit_code == 0 and not tests_modified else "unresolved"
         success = True
     except Exception as e:
+        card.error(e)
         if logger is not None:
             logger.error(f"Error processing entry {instance_id}: {e}")
         eval_result = "incomplete" if not model_patch else "error"
         success = False
     finally:
+        _finish_task_record(card, container, {"instance_id": instance_id, "model_name_or_path": model_name_or_path,
+                                            "eval_result": eval_result, "success": locals().get("success", False)}, out_dname)
         phases.done()
         try:
             if container is not None:
@@ -504,7 +486,8 @@ def process_entry_lc(entry, out_dname, model_name_or_path, model_patch_paths,
     result = {"instance_id": instance_id, "model_name_or_path": model_name_or_path,
               "model_patch": model_patch, "proposed_model_patches": [], "eval_result": eval_result,
               "success": success, "tests_modified": tests_modified, "lc_route": route,
-              "lc_parent": pdir.name if pdir is not None else None, "lc_cost": cost}
+              "lc_parent": pdir.name if pdir is not None else None, "lc_cost": cost,
+              "task_record": str(card.path.relative_to(out_dname)), "attempt_id": card.id}
     out_fname.write_text(json.dumps(result, indent=4))
     return {"success": success, "instance_id": instance_id, "eval_result": eval_result}
 

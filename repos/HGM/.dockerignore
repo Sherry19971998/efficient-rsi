@@ -33,6 +33,8 @@ prompts/diagnose_improvement_prompt.py
 utils/evo_utils.py
 utils/docker_utils.py
 hgm_utils.py
+sift.py
+task_records.py
 hgm.py
 evaluate_agent.py
 run.sh
